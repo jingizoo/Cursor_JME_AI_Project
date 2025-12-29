@@ -1,0 +1,10 @@
+# Cursor Rules (JME AI Finance Pipeline)
+Goal: Build an AI pipeline that ingests messy/dynamic Excel files, normalizes to canonical tables, and supports:
+- NL -> SQL analytics
+- Monthly report packs
+
+Rules:
+- Never do arithmetic with the LLM. Use DuckDB/SQL for totals.
+- LLM may only: classify sheet type, map columns, generate SELECT-only SQL.
+- Validate generated SQL (no writes, no multiple statements).
+- Keep code offline-first; Ollama runs locally/remote.

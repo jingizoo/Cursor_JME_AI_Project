@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Cache and Database
+.cache/
+*.db
+*.duckdb
+*.sqlite
+*.sqlite3
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Data directory (keep structure but ignore contents)
+data/*
+!data/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Reports (temporary)
+jme_ai_reports_*/
+
