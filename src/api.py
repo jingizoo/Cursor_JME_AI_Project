@@ -1,19 +1,17 @@
 import os
 import tempfile
 from pathlib import Path
+from typing import List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .db_store import connect
 from .ingest import ingest_folder
 from .planner_agent import plan_sql, get_schema
-from .report_service import generate_report_pack
-from typing import List
-from fastapi import UploadFile, File, Form
 from .quick_excel import quick_excel_query
-
+from .report_service import generate_report_pack
 
 DATA_DIR = Path(os.environ.get("JME_DATA_DIR", "./data"))
 CACHE_DIR = Path(os.environ.get("JME_CACHE_DIR", "./.cache"))
@@ -67,6 +65,7 @@ def ask(req: AskReq):
     except Exception as e:
         return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw","")}
     return {"ok": True, "sql": sql, "rows": df.to_dict(orient="records"), "notes": plan.get("notes","")}
+
 @app.post("/quick-excel")
 async def quick_excel(
     question: str = Form(...),
