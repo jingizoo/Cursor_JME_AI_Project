@@ -1,0 +1,189 @@
+# src/quick_excel.py
+import io
+import json
+import re
+import hashlib
+from typing import Any, Dict, List, Tuple
+
+import duckdb
+import pandas as pd
+
+from .llm_client import ollama_chat, extract_json
+
+SAFE_SQL_DENY = ["insert", "update", "delete", "drop", "alter", "create", "attach", "detach", "copy", "pragma", "call"]
+
+def _safe_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^0-9a-zA-Z_]", "_", s)
+    s = s.strip("_")
+    if not s:
+        s = "sheet"
+    if s[0].isdigit():
+        s = "t_" + s
+    return s
+
+def _short_hash(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
+
+def detect_header_row(xbytes: bytes, sheet: str, max_scan: int = 25) -> int:
+    preview = pd.read_excel(io.BytesIO(xbytes), sheet_name=sheet, header=None, nrows=max_scan, engine="openpyxl")
+    best_row = 0
+    best_score = -1
+    for i in range(min(max_scan, len(preview))):
+        score = int(preview.iloc[i].notna().sum())
+        if score > best_score:
+            best_score = score
+            best_row = i
+    return best_row
+
+def read_sheet(xbytes: bytes, sheet: str) -> pd.DataFrame:
+    hdr = detect_header_row(xbytes, sheet)
+    df = pd.read_excel(io.BytesIO(xbytes), sheet_name=sheet, header=hdr, engine="openpyxl")
+    df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    # Ensure column names are strings and unique
+    cols = [str(c) for c in df.columns]
+    seen = {}
+    fixed = []
+    for c in cols:
+        base = c.strip() or "col"
+        if base not in seen:
+            seen[base] = 0
+            fixed.append(base)
+        else:
+            seen[base] += 1
+            fixed.append(f"{base}_{seen[base]}")
+    df.columns = fixed
+    return df
+
+def validate_sql(sql: str) -> bool:
+    if not sql:
+        return False
+    s = sql.strip()
+    # Disallow multiple statements
+    if ";" in s:
+        parts = [p.strip() for p in s.split(";") if p.strip()]
+        if len(parts) != 1:
+            return False
+        s = parts[0]
+
+    s_low = s.lower()
+    if not (s_low.startswith("select") or s_low.startswith("with")):
+        return False
+
+    for bad in SAFE_SQL_DENY:
+        if bad in s_low:
+            return False
+
+    return True
+
+def ensure_limit(sql: str, limit: int = 200) -> str:
+    s = sql.strip().rstrip(";").strip()
+    if re.search(r"\blimit\b", s, flags=re.IGNORECASE):
+        return s
+    return f"{s}\nLIMIT {int(limit)}"
+
+def get_schema(con: duckdb.DuckDBPyConnection) -> Dict[str, Any]:
+    tables = {}
+    for (t,) in con.execute("SHOW TABLES").fetchall():
+        cols = con.execute(f"PRAGMA table_info('{t}')").fetchall()
+        tables[t] = [{"name": c[1], "type": c[2]} for c in cols]
+    return {"tables": tables}
+
+def plan_sql_one(*, base_url: str, model: str, schema: Dict[str, Any], question: str) -> Dict[str, Any]:
+    system = (
+        "You are a data analyst.\n"
+        "Return ONLY JSON with EXACTLY ONE SQL statement.\n"
+        "Rules:\n"
+        "- One statement only (no multiple SELECTs, no semicolons).\n"
+        "- SELECT or WITH only.\n"
+        "- No writes (no INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/etc).\n"
+        "- Always include LIMIT 200 (or less).\n"
+        "JSON format: {\"sql\":\"...\",\"notes\":\"...\"}\n"
+    )
+    user = json.dumps({"schema": schema, "question": question}, ensure_ascii=False)
+
+    try:
+        text = ollama_chat(base_url=base_url, model=model, messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ], temperature=0.0)
+    except Exception as e:
+        return {"ok": False, "error": f"Ollama call failed: {e}"}
+
+    obj = extract_json(text) or {}
+    sql = (obj.get("sql") or "").strip()
+
+    if not validate_sql(sql):
+        return {"ok": False, "error": "LLM produced unsafe/invalid SQL", "raw": text[:800]}
+
+    sql = ensure_limit(sql, 200)
+    return {"ok": True, "sql": sql, "notes": obj.get("notes",""), "raw": text[:500]}
+
+def quick_excel_query(
+    *,
+    files: List[Tuple[str, bytes]],   # [(filename, bytes), ...]
+    question: str,
+    base_url: str,
+    model: str,
+    max_rows_per_sheet: int = 20000,
+) -> Dict[str, Any]:
+    con = duckdb.connect(":memory:")
+
+    created_tables = []
+    # Load each sheet of each file into temp DuckDB tables
+    for fname, fbytes in files:
+        try:
+            xls = pd.ExcelFile(io.BytesIO(fbytes), engine="openpyxl")
+        except Exception as e:
+            created_tables.append({"file": fname, "error": f"Cannot read excel: {e}"})
+            continue
+
+        for sheet in xls.sheet_names:
+            try:
+                df = read_sheet(fbytes, sheet)
+                if df is None or df.shape[0] == 0:
+                    continue
+                if max_rows_per_sheet:
+                    df = df.head(int(max_rows_per_sheet))
+
+                tname = f"{_safe_name(Path(fname).stem)}__{_safe_name(sheet)}__{_short_hash(fname+'|'+sheet)}"
+                con.register("df_tmp", df)
+                con.execute(f'CREATE TABLE "{tname}" AS SELECT * FROM df_tmp')
+                con.unregister("df_tmp")
+
+                created_tables.append({
+                    "file": fname,
+                    "sheet": sheet,
+                    "table": tname,
+                    "rows": int(df.shape[0]),
+                    "cols": int(df.shape[1]),
+                })
+            except Exception as e:
+                created_tables.append({"file": fname, "sheet": sheet, "error": str(e)})
+
+    schema = get_schema(con)
+
+    plan = plan_sql_one(base_url=base_url, model=model, schema=schema, question=question)
+    if not plan.get("ok"):
+        return {"ok": False, "error": plan.get("error"), "created_tables": created_tables, "debug": plan.get("raw")}
+
+    sql = plan["sql"]
+    try:
+        df = con.execute(sql).df()
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"SQL execution failed: {e}",
+            "sql": sql,
+            "created_tables": created_tables,
+            "debug": plan.get("raw"),
+        }
+
+    return {
+        "ok": True,
+        "sql": sql,
+        "rows": df.to_dict(orient="records"),
+        "created_tables": created_tables,
+        "notes": plan.get("notes",""),
+    }
