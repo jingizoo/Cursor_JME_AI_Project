@@ -10,6 +10,10 @@ from .db_store import connect
 from .ingest import ingest_folder
 from .planner_agent import plan_sql, get_schema
 from .report_service import generate_report_pack
+from typing import List
+from fastapi import UploadFile, File, Form
+from .quick_excel import quick_excel_query
+
 
 DATA_DIR = Path(os.environ.get("JME_DATA_DIR", "./data"))
 CACHE_DIR = Path(os.environ.get("JME_CACHE_DIR", "./.cache"))
@@ -63,6 +67,21 @@ def ask(req: AskReq):
     except Exception as e:
         return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw","")}
     return {"ok": True, "sql": sql, "rows": df.to_dict(orient="records"), "notes": plan.get("notes","")}
+@app.post("/quick-excel")
+async def quick_excel(
+    question: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    payload = []
+    for f in files:
+        payload.append((f.filename, await f.read()))
+
+    return quick_excel_query(
+        files=payload,
+        question=question,
+        base_url=OLLAMA_URL,
+        model=OLLAMA_MODEL,
+    )
 
 @app.post("/report-pack")
 def report_pack(req: ReportReq):
