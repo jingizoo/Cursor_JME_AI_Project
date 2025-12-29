@@ -3,6 +3,9 @@ import tempfile
 from pathlib import Path
 from typing import List
 
+import numpy as np
+import pandas as pd
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -12,6 +15,12 @@ from .ingest import ingest_folder
 from .planner_agent import plan_sql, get_schema
 from .quick_excel import quick_excel_query
 from .report_service import generate_report_pack
+
+def df_to_records_safe(df: pd.DataFrame):
+    """Convert DataFrame to records, replacing NaN/Inf with None for JSON serialization."""
+    # Replace +/-inf with NaN, then convert NaN to None
+    df = df.replace([np.inf, -np.inf], np.nan)
+    return df.where(pd.notnull(df), None).to_dict(orient="records")
 
 DATA_DIR = Path(os.environ.get("JME_DATA_DIR", "./data"))
 CACHE_DIR = Path(os.environ.get("JME_CACHE_DIR", "./.cache"))
@@ -64,7 +73,7 @@ def ask(req: AskReq):
         df = con.execute(sql).df()
     except Exception as e:
         return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw","")}
-    return {"ok": True, "sql": sql, "rows": df.to_dict(orient="records"), "notes": plan.get("notes","")}
+    return {"ok": True, "sql": sql, "rows": df_to_records_safe(df), "notes": plan.get("notes","")}
 
 @app.post("/quick-excel")
 async def quick_excel(

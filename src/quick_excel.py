@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from .llm_client import ollama_chat, extract_json
@@ -181,10 +182,14 @@ def quick_excel_query(
             "debug": plan.get("raw"),
         }
 
+    # Replace +/-inf with NaN, then convert NaN to None for JSON serialization
+    df = df.replace([np.inf, -np.inf], np.nan)
+    rows = df.where(pd.notnull(df), None).to_dict(orient="records")
+
     return {
         "ok": True,
         "sql": sql,
-        "rows": df.to_dict(orient="records"),
+        "rows": rows,
         "created_tables": created_tables,
         "notes": plan.get("notes",""),
     }
