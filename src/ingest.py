@@ -1,11 +1,12 @@
 import re
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
-from .db_store import connect, upsert_mapping, find_mapping, append_rows
+from .db_store import connect, upsert_mapping, find_mapping, append_rows, upsert_raw_sheet, find_raw_sheet
 from .schema_agent import summarize_schema, infer_sheet_mapping
 
 def parse_num(x) -> Optional[float]:
@@ -44,6 +45,32 @@ def read_sheet(xf: Path, sheet: str) -> pd.DataFrame:
     df = pd.read_excel(str(xf), sheet_name=sheet, header=hdr, engine="openpyxl")
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
     return df
+
+def _safe_ident(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^0-9a-zA-Z_]", "_", s)
+    s = s.strip("_")
+    if not s:
+        s = "sheet"
+    if s[0].isdigit():
+        s = "t_" + s
+    return s
+
+def _short_hash(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
+
+def materialize_raw_sheet(con, *, file: str, sheet: str, df: pd.DataFrame) -> str:
+    """
+    Create/replace a raw DuckDB table for the sheet so it can be queried later via /ask.
+    Table name is deterministic per (file, sheet) so re-ingests overwrite the same table.
+    """
+    base = f"raw__{_safe_ident(Path(file).stem)}__{_safe_ident(sheet)}__{_short_hash(file + '|' + sheet)}"
+    # Quote identifier to be safe even if it contains odd characters (shouldn't after _safe_ident).
+    con.register("df_tmp", df)
+    con.execute(f'CREATE OR REPLACE TABLE "{base}" AS SELECT * FROM df_tmp')
+    con.unregister("df_tmp")
+    return base
 
 def normalize_and_insert(con, file: str, sheet: str, sheet_type: str, mapping: Dict[str, Any], df: pd.DataFrame):
     df2 = df.copy()
@@ -137,8 +164,10 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
 
         for sheet in xls.sheet_names:
             if not force:
+                # Don't skip if we haven't materialized a raw table yet (supports backfilling after upgrade).
                 existing = find_mapping(con, xf.name, sheet, file_size, file_mtime)
-                if existing:
+                existing_raw = find_raw_sheet(con, file=xf.name, sheet=sheet, file_size=file_size, file_mtime=file_mtime)
+                if existing and existing_raw:
                     skipped += 1
                     continue
 
@@ -147,6 +176,19 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                 if df is None or df.shape[0] == 0:
                     skipped += 1
                     continue
+
+                # Always create a raw table for the sheet (so it can be queried later).
+                raw_table = materialize_raw_sheet(con, file=xf.name, sheet=sheet, df=df)
+                upsert_raw_sheet(
+                    con,
+                    file=xf.name,
+                    sheet=sheet,
+                    file_size=file_size,
+                    file_mtime=file_mtime,
+                    raw_table=raw_table,
+                    n_rows=int(df.shape[0]),
+                    n_cols=int(df.shape[1]),
+                )
 
                 schema = summarize_schema(df)
                 mapping_rec = infer_sheet_mapping(base_url=base_url, model=model, file=xf.name, sheet=sheet, schema=schema)

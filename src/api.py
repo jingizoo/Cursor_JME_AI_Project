@@ -23,6 +23,44 @@ def df_to_records_safe(df: pd.DataFrame):
     df = df.replace([np.inf, -np.inf], np.nan)
     return df.where(pd.notnull(df), None).to_dict(orient="records")
 
+def _tables_preview(con, max_tables: int = 30) -> List[str]:
+    try:
+        rows = con.execute("SHOW TABLES").fetchall()
+        names = [r[0] for r in rows]
+        return names[:max_tables]
+    except Exception:
+        return []
+
+def _build_no_answer_hint(*, con, question: str, sql: str = "", error: str = "", empty: bool = False) -> str:
+    tables = _tables_preview(con)
+    raw_tables = [t for t in tables if t.startswith("raw__")]
+
+    if empty:
+        msg = "Query ran but returned 0 rows. Your filters may be too strict (dates/joins), or the data isn't in the expected table yet."
+        if raw_tables:
+            msg += f" I also see raw ingested sheet tables available (example: `{raw_tables[0]}`)."
+        if tables:
+            msg += " Check available tables via `/api/v1/tables` and columns via `/api/v1/schema`."
+        return msg
+
+    err = (error or "").lower()
+    if "does not exist" in err or "table with name" in err:
+        msg = "It looks like the SQL referenced a table that doesn't exist in DuckDB yet."
+        if raw_tables:
+            msg += f" You *do* have raw ingested sheet tables (example: `{raw_tables[0]}`), so try asking using the exact column names from those tables."
+        msg += " You can inspect tables via `/api/v1/tables` and columns via `/api/v1/table/<table>/columns`."
+        return msg
+
+    if "column" in err and ("not found" in err or "binder" in err):
+        msg = "It looks like the SQL referenced a column that doesn't exist (or needs quoting)."
+        msg += " Inspect columns via `/api/v1/table/<table>/columns` (or `/api/v1/schema`) and then re-ask using the exact column names."
+        return msg
+
+    msg = "The query failed to run. Check that ingestion created the needed tables/columns, then re-ask with more specific column/table hints."
+    if tables:
+        msg += f" Available tables (preview): {tables[:10]}"
+    return msg
+
 DATA_DIR = Path(os.environ.get("JME_DATA_DIR", "./data"))
 CACHE_DIR = Path(os.environ.get("JME_CACHE_DIR", "./.cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,16 +114,39 @@ def catalog():
 @app.post("/ask")
 def ask(req: AskReq):
     con = connect(DB_PATH)
-    schema = get_schema(con)
-    plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
-    if not plan.get("ok"):
-        return plan
-    sql = plan["sql"]
     try:
-        df = con.execute(sql).df()
-    except Exception as e:
-        return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw","")}
-    return {"ok": True, "sql": sql, "rows": df_to_records_safe(df), "notes": plan.get("notes","")}
+        schema = get_schema(con)
+        plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
+        if not plan.get("ok"):
+            # Provide a hint even when planning fails (often schema mismatch).
+            plan["hint"] = _build_no_answer_hint(con=con, question=req.question, error=str(plan.get("error", "")))
+            return plan
+
+        sql = plan["sql"]
+        try:
+            df = con.execute(sql).df()
+        except Exception as e:
+            err = f"{e}"
+            return {
+                "ok": False,
+                "error": f"SQL execution failed: {err}",
+                "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, error=err),
+                "sql": sql,
+                "plan_raw": plan.get("raw", ""),
+            }
+
+        if df is None or df.shape[0] == 0:
+            return {
+                "ok": True,
+                "sql": sql,
+                "rows": [],
+                "notes": plan.get("notes", ""),
+                "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, empty=True),
+            }
+
+        return {"ok": True, "sql": sql, "rows": df_to_records_safe(df), "notes": plan.get("notes","")}
+    finally:
+        con.close()
 
 @app.post("/quick-excel")
 async def quick_excel(

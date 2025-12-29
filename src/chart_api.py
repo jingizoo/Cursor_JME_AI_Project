@@ -37,6 +37,41 @@ def df_to_records_safe(df: pd.DataFrame):
     df = df.replace([np.inf, -np.inf], np.nan)
     return df.where(pd.notnull(df), None).to_dict(orient="records")
 
+def _tables_preview(con, max_tables: int = 30):
+    try:
+        rows = con.execute("SHOW TABLES").fetchall()
+        names = [r[0] for r in rows]
+        return names[:max_tables]
+    except Exception:
+        return []
+
+def _build_no_answer_hint(*, con, question: str, sql: str = "", error: str = "", empty: bool = False) -> str:
+    tables = _tables_preview(con)
+    raw_tables = [t for t in tables if t.startswith("raw__")]
+
+    if empty:
+        msg = "Query ran but returned 0 rows. Try loosening filters (month/date text), or verify the ingested raw sheet table/columns."
+        if raw_tables:
+            msg += f" Raw ingested sheet tables exist (example: `{raw_tables[0]}`)."
+        msg += " Tip: re-ask using the exact column names from the ingested table."
+        return msg
+
+    err = (error or "").lower()
+    if "does not exist" in err or "table with name" in err:
+        msg = "The SQL referenced a table that doesn't exist in the DB. This usually means ingestion didn't create a table for that sheet yet."
+        if raw_tables:
+            msg += f" I can see raw ingested sheet tables available (example: `{raw_tables[0]}`)."
+        msg += " Re-ask using the raw table + exact column names."
+        return msg
+
+    if "column" in err and ("not found" in err or "binder" in err):
+        return "The SQL referenced a column that doesn't exist (or needs quoting). Re-ask using the exact column names from your ingested table."
+
+    msg = "The query failed. Verify ingestion, then re-ask with more specific details (table/column names, month format)."
+    if tables:
+        msg += f" Available tables (preview): {tables[:10]}"
+    return msg
+
 def detect_chart_type(question: str, df: pd.DataFrame) -> str:
     """
     Detect the appropriate chart type based on question and data.
@@ -203,6 +238,7 @@ def ask_with_chart(req: ChartQuestionReq):
         plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
         
         if not plan.get("ok"):
+            plan["hint"] = _build_no_answer_hint(con=con, question=req.question, error=str(plan.get("error", "")))
             return plan
         
         sql = plan["sql"]
@@ -211,7 +247,14 @@ def ask_with_chart(req: ChartQuestionReq):
         try:
             df = con.execute(sql).df()
         except Exception as e:
-            return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw", "")}
+            err = f"{e}"
+            return {
+                "ok": False,
+                "error": f"SQL execution failed: {err}",
+                "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, error=err),
+                "sql": sql,
+                "plan_raw": plan.get("raw", ""),
+            }
         
         if df.empty:
             return {
@@ -219,7 +262,8 @@ def ask_with_chart(req: ChartQuestionReq):
                 "message": "Query executed successfully but returned no results",
                 "sql": sql,
                 "data": [],
-                "chart": None
+                "chart": None,
+                "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, empty=True),
             }
         
         # Determine chart type

@@ -70,6 +70,19 @@ CANON_DDL = [
         PRIMARY KEY (file, sheet, file_size, file_mtime)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS raw_sheet_registry (
+        file TEXT,
+        sheet TEXT,
+        file_size BIGINT,
+        file_mtime BIGINT,
+        raw_table TEXT,
+        n_rows BIGINT,
+        n_cols BIGINT,
+        updated_ts DOUBLE,
+        PRIMARY KEY (file, sheet, file_size, file_mtime)
+    )
+    """,
 ]
 
 def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
@@ -108,3 +121,39 @@ def append_rows(con, table: str, df: pd.DataFrame) -> None:
     con.register("df_tmp", df)
     con.execute(f"INSERT INTO {table} SELECT * FROM df_tmp")
     con.unregister("df_tmp")
+
+def upsert_raw_sheet(
+    con,
+    *,
+    file: str,
+    sheet: str,
+    file_size: int,
+    file_mtime: int,
+    raw_table: str,
+    n_rows: int,
+    n_cols: int,
+) -> None:
+    con.execute(
+        """
+        INSERT OR REPLACE INTO raw_sheet_registry
+        (file, sheet, file_size, file_mtime, raw_table, n_rows, n_cols, updated_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [file, sheet, int(file_size), int(file_mtime), raw_table, int(n_rows), int(n_cols), time.time()],
+    )
+
+def find_raw_sheet(
+    con,
+    *,
+    file: str,
+    sheet: str,
+    file_size: int,
+    file_mtime: int,
+) -> Optional[Dict[str, Any]]:
+    row = con.execute(
+        "SELECT raw_table, n_rows, n_cols, updated_ts FROM raw_sheet_registry WHERE file=? AND sheet=? AND file_size=? AND file_mtime=?",
+        [file, sheet, int(file_size), int(file_mtime)],
+    ).fetchone()
+    if not row:
+        return None
+    return {"raw_table": row[0], "n_rows": int(row[1] or 0), "n_cols": int(row[2] or 0), "updated_ts": row[3]}

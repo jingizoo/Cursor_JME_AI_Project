@@ -285,3 +285,4 @@ To add new chart types (e.g., scatter, heatmap):
 - Charts are optimized for web display (100 DPI)
 - All NaN/Infinity values are handled automatically
 
+

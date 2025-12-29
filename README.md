@@ -45,3 +45,16 @@ Swagger:
 4) POST `/ask`     (NL -> SQL plan via LLM -> executed)
 5) POST `/report-pack` (download Excel pack)
 
+## New: Raw sheet tables (for non-canonical sheets like timesheets / hours)
+During `/ingest`, **every sheet** is also materialized into a queryable DuckDB table named like:
+- `raw__<file>__<sheet>__<hash>`
+
+This means even if a sheet is mapped as `unknown` (or doesn't fit invoices/payments/expenses/bank), you can still query it via `/ask` (and Superset endpoints) by using the raw table + its real column names.
+
+To discover these tables/columns:
+- **Tables**: `GET /api/v1/tables`
+- **Columns**: `GET /api/v1/table/<table_name>/columns`
+
+## Better “no answer” hints
+If `/ask` (or `/ask-chart`) can’t execute SQL or returns 0 rows, the response now includes a **`hint`** field explaining likely causes (missing table/column, filters too strict) and where to inspect tables/columns.
+

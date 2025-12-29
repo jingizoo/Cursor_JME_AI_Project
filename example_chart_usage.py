@@ -115,3 +115,4 @@ if __name__ == "__main__":
     if response3.get("ok"):
         save_chart(response3, "expense_distribution.png")
 
+
