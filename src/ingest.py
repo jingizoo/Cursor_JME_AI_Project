@@ -1,13 +1,21 @@
 import re
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import numpy as np
 import pandas as pd
 
+try:
+    import pdfplumber
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
 from .db_store import connect, upsert_mapping, find_mapping, append_rows, upsert_raw_sheet, find_raw_sheet
 from .schema_agent import summarize_schema, infer_sheet_mapping
+from .vector_db import store_pdf_embeddings, store_wiki_embeddings
+from .wiki_extractor import extract_wiki_from_url
 
 def parse_num(x) -> Optional[float]:
     if x is None:
@@ -45,6 +53,39 @@ def read_sheet(xf: Path, sheet: str) -> pd.DataFrame:
     df = pd.read_excel(str(xf), sheet_name=sheet, header=hdr, engine="openpyxl")
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
     return df
+
+def extract_pdf_tables(pdf_path: Path) -> List[Dict[str, Any]]:
+    """
+    Extract tables from PDF file.
+    Returns list of {page_num, table_df} for each table found.
+    """
+    if not PDF_AVAILABLE:
+        return []
+    
+    tables = []
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                page_tables = page.extract_tables()
+                for table_idx, table in enumerate(page_tables):
+                    if table and len(table) > 1:  # At least header + 1 row
+                        # Convert to DataFrame
+                        df = pd.DataFrame(table[1:], columns=table[0] if table[0] else None)
+                        # Clean up column names
+                        df.columns = [str(c).strip() if c else f"col_{i}" for i, c in enumerate(df.columns)]
+                        df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+                        if df.shape[0] > 0 and df.shape[1] > 0:
+                            tables.append({
+                                "page": page_num,
+                                "table_idx": table_idx,
+                                "df": df,
+                                "sheet_name": f"page_{page_num}_table_{table_idx + 1}"
+                            })
+    except Exception as e:
+        # Return empty list on error, will be caught by caller
+        pass
+    
+    return tables
 
 def _safe_ident(s: str) -> str:
     s = (s or "").strip().lower()
@@ -146,12 +187,13 @@ def normalize_and_insert(con, file: str, sheet: str, sheet_type: str, mapping: D
         }).dropna(subset=["amount"], how="all")
         append_rows(con, "bank_txns", out)
 
-def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False):
+def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None):
     con = connect(db_path)
     ingested = 0
     skipped = 0
     errors = []
 
+    # Process Excel files
     for xf in sorted(list(data_dir.glob("*.xlsx")) + list(data_dir.glob("*.xlsm"))):
         st = xf.stat()
         file_size, file_mtime = int(st.st_size), int(st.st_mtime)
@@ -210,4 +252,109 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
             except Exception as e:
                 errors.append({"file": xf.name, "sheet": sheet, "error": str(e)})
 
-    return {"ok": True, "ingested_sheets": ingested, "skipped": skipped, "errors": errors}
+    # Process PDF files
+    if PDF_AVAILABLE:
+        for pdf_path in sorted(data_dir.glob("*.pdf")):
+            st = pdf_path.stat()
+            file_size, file_mtime = int(st.st_size), int(st.st_mtime)
+
+            # Extract and store PDF text in vector DB (for semantic search)
+            # Note: Uses embedding model, not the LLM model
+            try:
+                vec_result = store_pdf_embeddings(pdf_path, base_url=base_url, embedding_model="nomic-embed-text")
+                if vec_result.get("ok"):
+                    print(f"✓ Stored {vec_result.get('chunks_stored', 0)} text chunks from {pdf_path.name} in vector DB")
+            except Exception as e:
+                print(f"Warning: Failed to store PDF embeddings for {pdf_path.name}: {e}")
+
+            try:
+                pdf_tables = extract_pdf_tables(pdf_path)
+                if not pdf_tables:
+                    errors.append({"file": pdf_path.name, "error": "No tables found in PDF"})
+                    continue
+            except Exception as e:
+                errors.append({"file": pdf_path.name, "error": f"Failed to read PDF: {e}"})
+                continue
+
+            for table_info in pdf_tables:
+                sheet = table_info["sheet_name"]
+                df = table_info["df"]
+
+                if not force:
+                    existing = find_mapping(con, pdf_path.name, sheet, file_size, file_mtime)
+                    existing_raw = find_raw_sheet(con, file=pdf_path.name, sheet=sheet, file_size=file_size, file_mtime=file_mtime)
+                    if existing and existing_raw:
+                        skipped += 1
+                        continue
+
+                try:
+                    if df is None or df.shape[0] == 0:
+                        skipped += 1
+                        continue
+
+                    # Always create a raw table for the sheet
+                    raw_table = materialize_raw_sheet(con, file=pdf_path.name, sheet=sheet, df=df)
+                    upsert_raw_sheet(
+                        con,
+                        file=pdf_path.name,
+                        sheet=sheet,
+                        file_size=file_size,
+                        file_mtime=file_mtime,
+                        raw_table=raw_table,
+                        n_rows=int(df.shape[0]),
+                        n_cols=int(df.shape[1]),
+                    )
+
+                    schema = summarize_schema(df)
+                    mapping_rec = infer_sheet_mapping(base_url=base_url, model=model, file=pdf_path.name, sheet=sheet, schema=schema)
+
+                    upsert_mapping(con, {
+                        "file": pdf_path.name,
+                        "sheet": sheet,
+                        "file_size": file_size,
+                        "file_mtime": file_mtime,
+                        "sheet_type": mapping_rec["sheet_type"],
+                        "mapping": mapping_rec["mapping"],
+                        "confidence": mapping_rec["confidence"],
+                        "notes": mapping_rec.get("notes",""),
+                    })
+
+                    normalize_and_insert(con, pdf_path.name, sheet, mapping_rec["sheet_type"], mapping_rec["mapping"], df)
+                    ingested += 1
+
+                except Exception as e:
+                    errors.append({"file": pdf_path.name, "sheet": sheet, "error": str(e)})
+    else:
+        # If PDF support not available, add a note
+        errors.append({"file": "system", "error": "PDF support not available (install pdfplumber)"})
+
+    # Process Wiki pages
+    wiki_ingested = 0
+    if wiki_urls:
+        print(f"\n📚 Processing {len(wiki_urls)} wiki page(s)...")
+        for wiki_url in wiki_urls:
+            try:
+                # Extract wiki content
+                wiki_result = extract_wiki_from_url(wiki_url, api_key=wiki_api_key)
+                if not wiki_result.get("ok"):
+                    errors.append({"file": f"wiki:{wiki_url}", "error": wiki_result.get("error", "Unknown error")})
+                    continue
+                
+                # Store in vector DB
+                vec_result = store_wiki_embeddings(
+                    title=wiki_result.get("title", "Wiki Page"),
+                    content=wiki_result.get("content", ""),
+                    url=wiki_result.get("url", wiki_url),
+                    base_url=base_url,
+                    embedding_model="nomic-embed-text"
+                )
+                
+                if vec_result.get("ok"):
+                    wiki_ingested += 1
+                    print(f"✓ Stored {vec_result.get('chunks_stored', 0)} chunks from wiki: {wiki_result.get('title', wiki_url)}")
+                else:
+                    errors.append({"file": f"wiki:{wiki_url}", "error": vec_result.get("error", "Failed to store embeddings")})
+            except Exception as e:
+                errors.append({"file": f"wiki:{wiki_url}", "error": f"Failed to process wiki: {e}"})
+
+    return {"ok": True, "ingested_sheets": ingested, "wiki_pages": wiki_ingested, "skipped": skipped, "errors": errors}

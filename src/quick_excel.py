@@ -10,6 +10,12 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+try:
+    import pdfplumber
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
 from .llm_client import ollama_chat, extract_json
 
 SAFE_SQL_DENY = ["insert", "update", "delete", "drop", "alter", "create", "attach", "detach", "copy", "pragma", "call"]
@@ -122,6 +128,32 @@ def plan_sql_one(*, base_url: str, model: str, schema: Dict[str, Any], question:
     sql = ensure_limit(sql, 200)
     return {"ok": True, "sql": sql, "notes": obj.get("notes",""), "raw": text[:500]}
 
+def extract_pdf_tables_from_bytes(fbytes: bytes) -> List[Dict[str, Any]]:
+    """Extract tables from PDF bytes. Returns list of {page, table_idx, df, sheet_name}."""
+    if not PDF_AVAILABLE:
+        return []
+    
+    tables = []
+    try:
+        with pdfplumber.open(io.BytesIO(fbytes)) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                page_tables = page.extract_tables()
+                for table_idx, table in enumerate(page_tables):
+                    if table and len(table) > 1:
+                        df = pd.DataFrame(table[1:], columns=table[0] if table[0] else None)
+                        df.columns = [str(c).strip() if c else f"col_{i}" for i, c in enumerate(df.columns)]
+                        df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+                        if df.shape[0] > 0 and df.shape[1] > 0:
+                            tables.append({
+                                "page": page_num,
+                                "table_idx": table_idx,
+                                "df": df,
+                                "sheet_name": f"page_{page_num}_table_{table_idx + 1}"
+                            })
+    except Exception:
+        pass
+    return tables
+
 def quick_excel_query(
     *,
     files: List[Tuple[str, bytes]],   # [(filename, bytes), ...]
@@ -135,6 +167,44 @@ def quick_excel_query(
     created_tables = []
     # Load each sheet of each file into temp DuckDB tables
     for fname, fbytes in files:
+        fname_lower = fname.lower()
+        
+        # Handle PDF files
+        if fname_lower.endswith('.pdf'):
+            if not PDF_AVAILABLE:
+                created_tables.append({"file": fname, "error": "PDF support not available (install pdfplumber)"})
+                continue
+            try:
+                pdf_tables = extract_pdf_tables_from_bytes(fbytes)
+                if not pdf_tables:
+                    created_tables.append({"file": fname, "error": "No tables found in PDF"})
+                    continue
+                
+                for table_info in pdf_tables:
+                    sheet = table_info["sheet_name"]
+                    df = table_info["df"]
+                    if df is None or df.shape[0] == 0:
+                        continue
+                    if max_rows_per_sheet:
+                        df = df.head(int(max_rows_per_sheet))
+                    
+                    tname = f"{_safe_name(Path(fname).stem)}__{_safe_name(sheet)}__{_short_hash(fname+'|'+sheet)}"
+                    con.register("df_tmp", df)
+                    con.execute(f'CREATE TABLE "{tname}" AS SELECT * FROM df_tmp')
+                    con.unregister("df_tmp")
+                    
+                    created_tables.append({
+                        "file": fname,
+                        "sheet": sheet,
+                        "table": tname,
+                        "rows": int(df.shape[0]),
+                        "cols": int(df.shape[1]),
+                    })
+            except Exception as e:
+                created_tables.append({"file": fname, "error": f"Cannot read PDF: {e}"})
+            continue
+        
+        # Handle Excel files
         try:
             xls = pd.ExcelFile(io.BytesIO(fbytes), engine="openpyxl")
         except Exception as e:

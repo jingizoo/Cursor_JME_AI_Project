@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -150,6 +150,8 @@ app.add_middleware(
 
 class IngestReq(BaseModel):
     force: bool = False
+    wiki_urls: Optional[List[str]] = None  # List of wiki page URLs to ingest
+    wiki_api_key: Optional[str] = None  # Optional API key for private wikis
 
 class AskReq(BaseModel):
     question: str
@@ -166,7 +168,15 @@ def health():
 def ingest(req: IngestReq):
     if not DATA_DIR.exists():
         return {"ok": False, "error": f"DATA_DIR not found: {DATA_DIR.resolve()}"}
-    return ingest_folder(data_dir=DATA_DIR, db_path=DB_PATH, base_url=OLLAMA_URL, model=OLLAMA_MODEL, force=req.force)
+    return ingest_folder(
+        data_dir=DATA_DIR,
+        db_path=DB_PATH,
+        base_url=OLLAMA_URL,
+        model=OLLAMA_MODEL,
+        force=req.force,
+        wiki_urls=req.wiki_urls,
+        wiki_api_key=req.wiki_api_key
+    )
 
 @app.get("/catalog")
 def catalog():
