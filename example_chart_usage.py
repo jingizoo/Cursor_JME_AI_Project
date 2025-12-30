@@ -60,15 +60,23 @@ def display_chart_info(response_data):
     """Display information about the chart response."""
     if not response_data.get("ok"):
         print(f"❌ Error: {response_data.get('error', 'Unknown error')}")
+        if response_data.get("hint"):
+            print(f"💡 Hint: {response_data['hint']}")
         return
     
     print("✅ Query successful!")
-    print(f"📊 Chart Type: {response_data['chart']['type']}")
+    chart = response_data.get("chart")
+    if chart:
+        print(f"📊 Chart Type: {chart.get('type')}")
+    else:
+        print("📊 Chart Type: (none)")
     print(f"📈 Data Rows: {len(response_data['data'])}")
     print(f"💾 SQL: {response_data['sql']}")
     
     if response_data.get('notes'):
         print(f"📝 Notes: {response_data['notes']}")
+    if response_data.get("hint"):
+        print(f"💡 Hint: {response_data['hint']}")
     
     # Show first few rows of data
     if response_data['data']:
