@@ -31,11 +31,71 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
 
 app = FastAPI(title="JME AI Finance Pipeline - Chart Data API")
 
+_DB_MTIME_CACHE: float | None = None
+_TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}
+
 
 def df_to_records_safe(df: pd.DataFrame):
     df = df.replace([np.inf, -np.inf], np.nan)
     return df.where(pd.notnull(df), None).to_dict(orient="records")
 
+def _maybe_invalidate_schema_cache() -> None:
+    global _DB_MTIME_CACHE, _TABLE_INFO_CACHE
+    try:
+        mtime = DB_PATH.stat().st_mtime
+    except Exception:
+        mtime = None
+    if _DB_MTIME_CACHE != mtime:
+        _DB_MTIME_CACHE = mtime
+        _TABLE_INFO_CACHE = {}
+
+def _get_table_info_cached(con, table: str) -> list[dict[str, str]]:
+    _maybe_invalidate_schema_cache()
+    cached = _TABLE_INFO_CACHE.get(table)
+    if cached is not None:
+        return cached
+    cols = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+    out = [{"name": c[1], "type": c[2]} for c in cols]
+    _TABLE_INFO_CACHE[table] = out
+    return out
+
+def _schema_for_llm(con, question: str) -> dict:
+    """
+    Compact schema payload -> improves speed and SQL accuracy by reducing noise.
+    Includes canonical tables + a small set of relevant/recent raw__ tables.
+    """
+    base_tables = ["invoices", "payments", "expenses", "bank_txns", "schema_registry", "raw_sheet_registry"]
+    existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    existing_set = set(existing_tables)
+
+    recent_raw: list[str] = []
+    if "raw_sheet_registry" in existing_set:
+        try:
+            rows = con.execute(
+                "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC LIMIT 25"
+            ).fetchall()
+            recent_raw = [r[0] for r in rows if r and r[0]]
+        except Exception:
+            recent_raw = []
+
+    tokens = [t for t in "".join([c.lower() if c.isalnum() else " " for c in (question or "")]).split() if len(t) >= 3]
+    matched = []
+    if tokens and recent_raw:
+        for tname in recent_raw:
+            tlow = tname.lower()
+            if any(tok in tlow for tok in tokens):
+                matched.append(tname)
+
+    selected_raw = (matched + recent_raw)[:8]
+    selected = []
+    for t in base_tables + selected_raw:
+        if t in existing_set and t not in selected:
+            selected.append(t)
+
+    tables: dict[str, list[dict[str, str]]] = {}
+    for t in selected:
+        tables[t] = _get_table_info_cached(con, t)
+    return {"tables": tables}
 
 def detect_chart_type(question: str, df: pd.DataFrame) -> str:
     q = (question or "").lower()
@@ -53,15 +113,14 @@ def detect_chart_type(question: str, df: pd.DataFrame) -> str:
 class AskDataReq(BaseModel):
     question: str
     chart_type: Optional[str] = None  # bar/line/pie/auto
+    retry_on_error: bool = True
 
 
 @app.post("/ask-data")
 def ask_data(req: AskDataReq):
     con = connect(DB_PATH)
     try:
-        # Reuse compact schema selection already used in main API by letting planner see full schema.
-        # For best speed, you can switch this to a compact schema builder similar to src/api.py.
-        schema = get_schema(con)
+        schema = _schema_for_llm(con, req.question)
         plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
         if not plan.get("ok"):
             return plan
@@ -69,7 +128,26 @@ def ask_data(req: AskDataReq):
         try:
             df = con.execute(sql).df()
         except Exception as e:
-            return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw", "")}
+            # Optional one-shot retry with error context to improve SQL accuracy
+            if req.retry_on_error:
+                q2 = (
+                    f"{req.question}\n\n"
+                    f"Previous SQL failed with error: {e}\n"
+                    f"Generate corrected SQL using ONLY the provided schema. SELECT/CTE only."
+                )
+                plan2 = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=q2)
+                if plan2.get("ok"):
+                    sql2 = plan2["sql"]
+                    try:
+                        df = con.execute(sql2).df()
+                        sql = sql2
+                        plan = plan2
+                    except Exception as e2:
+                        return {"ok": False, "error": f"SQL execution failed: {e2}", "sql": sql2, "plan_raw": plan2.get("raw", "")}
+                else:
+                    return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw", ""), "retry_error": plan2.get("error")}
+            else:
+                return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw", "")}
 
         rows = df_to_records_safe(df)
         ctype = req.chart_type or detect_chart_type(req.question, df)

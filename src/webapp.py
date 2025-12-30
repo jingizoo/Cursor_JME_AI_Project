@@ -74,6 +74,7 @@ INDEX_HTML = """<!doctype html>
                 <option value="pie">pie</option>
                 <option value="scatter">scatter</option>
                 <option value="bubble">bubble</option>
+                <option value="heatmap">heatmap</option>
               </select>
               <button id="askBtn">Ask</button>
               <span id="status" class="muted"></span>
@@ -373,6 +374,66 @@ INDEX_HTML = """<!doctype html>
           const xCol = labelCol;
           const x = plotRows.map(r => r[xCol]);
           const yCols = numericCols.length ? numericCols : [cols[1]];
+          // If we have 2 categorical dimensions + 1 measure, use dim2 as series.
+          if ((type === 'bar' || type === 'auto') && textCols.length >= 2 && yCols.length === 1) {
+            const dim1 = textCols[0];
+            const dim2 = textCols[1];
+            const measure = yCols[0];
+
+            // Build series by dim2; keep dim1 as x-axis categories.
+            const dim2Vals = Array.from(new Set(plotRows.map(r => r[dim2]))).slice(0, 12);
+            const dim1Vals = Array.from(new Set(plotRows.map(r => r[dim1]))).slice(0, 60);
+
+            // Index rows by (dim1, dim2)
+            const idx = new Map();
+            for (const r of plotRows) {
+              const k = String(r[dim1]) + '||' + String(r[dim2]);
+              idx.set(k, toNumber(r[measure]));
+            }
+
+            const traces = dim2Vals.map(v2 => ({
+              x: dim1Vals,
+              y: dim1Vals.map(v1 => idx.get(String(v1) + '||' + String(v2)) ?? null),
+              type: 'bar',
+              name: String(v2),
+            }));
+            const barLayout = {
+              barmode: 'group',
+              title: { text: `Bar: ${measure} by ${dim1} (split by ${dim2})`, x: 0.02, font: { size: 14 } },
+              xaxis: { title: dim1 },
+              yaxis: { title: measure },
+            };
+            draw(traces, barLayout);
+            return;
+          }
+
+          // Heatmap (2 dims + 1 measure) if requested
+          if (type === 'heatmap' && textCols.length >= 2 && yCols.length >= 1) {
+            const dim1 = textCols[0];
+            const dim2 = textCols[1];
+            const measure = yCols[0];
+            const xVals = Array.from(new Set(plotRows.map(r => r[dim2]))).slice(0, 40);
+            const yVals = Array.from(new Set(plotRows.map(r => r[dim1]))).slice(0, 60);
+
+            const z = yVals.map(vy => xVals.map(vx => null));
+            const xIdx = new Map(xVals.map((v, i) => [String(v), i]));
+            const yIdx = new Map(yVals.map((v, i) => [String(v), i]));
+            for (const r of plotRows) {
+              const yi = yIdx.get(String(r[dim1]));
+              const xi = xIdx.get(String(r[dim2]));
+              if (yi === undefined || xi === undefined) continue;
+              z[yi][xi] = toNumber(r[measure]);
+            }
+
+            const trace = { type: 'heatmap', x: xVals, y: yVals, z, colorscale: 'Blues' };
+            draw([trace], {
+              title: { text: `Heatmap: ${measure} by ${dim1} × ${dim2}`, x: 0.02, font: { size: 14 } },
+              xaxis: { title: dim2, tickangle: -35 },
+              yaxis: { title: dim1, automargin: true },
+            });
+            return;
+          }
+
           const traces = yCols.slice(0, 6).map(c => ({
             x,
             y: plotRows.map(r => toNumber(r[c])),
