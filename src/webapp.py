@@ -72,6 +72,8 @@ INDEX_HTML = """<!doctype html>
                 <option value="bar">bar</option>
                 <option value="line">line</option>
                 <option value="pie">pie</option>
+                <option value="scatter">scatter</option>
+                <option value="bubble">bubble</option>
               </select>
               <button id="askBtn">Ask</button>
               <span id="status" class="muted"></span>
@@ -116,7 +118,6 @@ INDEX_HTML = """<!doctype html>
       const hintEl = document.getElementById('hint');
       const sqlEl = document.getElementById('sql');
       const notesEl = document.getElementById('notes');
-      const imgEl = document.getElementById('img');
       const noimgEl = document.getElementById('noimg');
       const plotEl = document.getElementById('plot');
       const tableWrap = document.getElementById('tableWrap');
@@ -144,6 +145,67 @@ INDEX_HTML = """<!doctype html>
         tableWrap.innerHTML = html;
       }
 
+      function toNumber(v) {
+        if (v === null || v === undefined || v === '') return null;
+        if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+        const n = Number(String(v).replaceAll(',', ''));
+        return Number.isFinite(n) ? n : null;
+      }
+
+      function isDateLike(v) {
+        if (v === null || v === undefined) return false;
+        if (v instanceof Date) return true;
+        const s = String(v);
+        const t = Date.parse(s);
+        return !Number.isNaN(t) && s.length >= 6;
+      }
+
+      function inferColumnTypes(rows, cols) {
+        const sampleN = Math.min(rows.length, 50);
+        const numericCols = [];
+        const dateCols = [];
+        const textCols = [];
+
+        for (const c of cols) {
+          let numCount = 0;
+          let dateCount = 0;
+          let seen = 0;
+          for (let i = 0; i < sampleN; i++) {
+            const v = rows[i]?.[c];
+            if (v === null || v === undefined || v === '') continue;
+            seen++;
+            if (toNumber(v) !== null) numCount++;
+            if (isDateLike(v)) dateCount++;
+          }
+          const numRatio = seen ? numCount / seen : 0;
+          const dateRatio = seen ? dateCount / seen : 0;
+          if (numRatio >= 0.75) numericCols.push(c);
+          else if (dateRatio >= 0.75) dateCols.push(c);
+          else textCols.push(c);
+        }
+
+        return { numericCols, dateCols, textCols };
+      }
+
+      function scaleSizes(vals) {
+        // vals: array<number|null>
+        const nums = vals.filter(v => typeof v === 'number' && Number.isFinite(v));
+        if (nums.length === 0) return vals.map(_ => 10);
+        const min = Math.min(...nums);
+        const max = Math.max(...nums);
+        if (min === max) return vals.map(v => (v === null ? 10 : 28));
+        return vals.map(v => {
+          if (v === null) return 10;
+          const t = (v - min) / (max - min);
+          return 10 + t * 30; // 10..40
+        });
+      }
+
+      function clearPlot() {
+        try { Plotly.purge(plotEl); } catch {}
+        plotEl.innerHTML = '';
+      }
+
       async function ask() {
         const question = qEl.value.trim();
         if (!question) return;
@@ -153,7 +215,7 @@ INDEX_HTML = """<!doctype html>
         sqlEl.textContent = '';
         notesEl.textContent = '';
         noimgEl.style.display = 'block';
-        plotEl.innerHTML = '';
+        clearPlot();
         tableWrap.innerHTML = '';
 
         askBtn.disabled = true;
@@ -188,36 +250,137 @@ INDEX_HTML = """<!doctype html>
           const rows = data.data || [];
           renderTable(rows.slice(0, 200));
 
-          // Render interactive chart using Plotly (first 2 columns)
-          if (rows.length > 0 && data.chart && data.chart.type && rows[0]) {
-            const cols = Object.keys(rows[0]);
-            if (cols.length >= 2) {
-              const x = rows.map(r => r[cols[0]]);
-              const y = rows.map(r => r[cols[1]]);
-              const type = data.chart.type;
-              let trace = null;
-              if (type === 'line') {
-                trace = { x, y, type: 'scatter', mode: 'lines+markers' };
-              } else if (type === 'pie') {
-                trace = { labels: x, values: y, type: 'pie' };
-              } else {
-                trace = { x, y, type: 'bar' };
-              }
-              const layout = {
-                margin: { l: 50, r: 20, t: 30, b: 120 },
-                xaxis: { automargin: true, tickangle: -35 },
-                yaxis: { automargin: true },
-                paper_bgcolor: 'rgba(0,0,0,0)',
-                plot_bgcolor: 'rgba(0,0,0,0)',
-              };
-              Plotly.newPlot(plotEl, [trace], layout, { responsive: true, displaylogo: false });
-              noimgEl.style.display = 'none';
-            } else {
-              noimgEl.textContent = 'Not enough columns to chart (need at least 2).';
-            }
-          } else {
+          // Render interactive chart using Plotly with smart handling for 2+ columns.
+          if (rows.length === 0 || !rows[0]) {
             noimgEl.textContent = 'No chart (empty result).';
+            return;
           }
+
+          const cols = Object.keys(rows[0]);
+          if (cols.length < 2) {
+            noimgEl.textContent = 'Not enough columns to chart (need at least 2).';
+            return;
+          }
+
+          const { numericCols, dateCols, textCols } = inferColumnTypes(rows, cols);
+          const requested = (data.chart && data.chart.type) ? data.chart.type : 'auto';
+          const type = requested || 'auto';
+
+          // Limit points for scatter/bubble to keep UI snappy
+          const maxPoints = 800;
+          const plotRows = rows.length > maxPoints ? rows.slice(0, maxPoints) : rows;
+
+          const layoutBase = {
+            margin: { l: 55, r: 20, t: 30, b: 120 },
+            xaxis: { automargin: true, tickangle: -35 },
+            yaxis: { automargin: true },
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            plot_bgcolor: 'rgba(0,0,0,0)',
+            legend: { orientation: 'h' },
+          };
+
+          // Auto-pick columns
+          const labelCol = textCols[0] || cols[0];
+          const xDateCol = dateCols[0] || null;
+
+          function draw(traces, layout) {
+            Plotly.newPlot(plotEl, traces, { ...layoutBase, ...(layout || {}) }, { responsive: true, displaylogo: false });
+            noimgEl.style.display = 'none';
+          }
+
+          // 1) Bubble / scatter
+          const autoWantsBubble = (type === 'auto' && numericCols.length >= 3 && cols.length >= 3);
+          const wantsBubble = (type === 'bubble') || autoWantsBubble;
+          const wantsScatter = (type === 'scatter') || (type === 'auto' && numericCols.length >= 2 && cols.length >= 3);
+
+          if (wantsBubble || wantsScatter) {
+            if (numericCols.length < 2) {
+              noimgEl.textContent = 'Need at least 2 numeric columns for scatter/bubble.';
+              return;
+            }
+            const xCol = numericCols[0];
+            const yCol = numericCols[1];
+            const sizeCol = numericCols[2] || null;
+            const textCol = textCols[0] || null;
+
+            const x = [];
+            const y = [];
+            const text = [];
+            const sizesRaw = [];
+
+            for (const r of plotRows) {
+              const xv = toNumber(r[xCol]);
+              const yv = toNumber(r[yCol]);
+              if (xv === null || yv === null) continue;
+              x.push(xv);
+              y.push(yv);
+              if (textCol) text.push(String(r[textCol]));
+              sizesRaw.push(sizeCol ? toNumber(r[sizeCol]) : null);
+            }
+
+            if (x.length === 0) {
+              noimgEl.textContent = 'No numeric points to plot (check nulls / types).';
+              return;
+            }
+
+            const sizes = wantsBubble ? scaleSizes(sizesRaw) : sizesRaw.map(_ => 10);
+            const trace = {
+              x,
+              y,
+              type: 'scatter',
+              mode: 'markers',
+              text: textCol ? text : undefined,
+              hovertemplate: textCol ? '%{text}<br>x=%{x}<br>y=%{y}<extra></extra>' : 'x=%{x}<br>y=%{y}<extra></extra>',
+              marker: {
+                size: sizes,
+                sizemode: 'diameter',
+                opacity: 0.75,
+                color: '#2563eb',
+              },
+            };
+            const title = wantsBubble ? `Bubble: ${xCol} vs ${yCol}${sizeCol ? ` (size=${sizeCol})` : ''}` : `Scatter: ${xCol} vs ${yCol}`;
+            draw([trace], { title: { text: title, x: 0.02, font: { size: 14 } }, xaxis: { title: xCol }, yaxis: { title: yCol } });
+            return;
+          }
+
+          // 2) Pie (label + value)
+          if (type === 'pie') {
+            const valCol = numericCols[0] || cols[1];
+            const labels = plotRows.map(r => r[labelCol]);
+            const values = plotRows.map(r => toNumber(r[valCol]) ?? 0);
+            draw([{ type: 'pie', labels, values, textinfo: 'label+percent' }], { title: { text: `Pie: ${valCol} by ${labelCol}`, x: 0.02, font: { size: 14 } } });
+            return;
+          }
+
+          // 3) Line: date/time x if available, otherwise label x; support multiple numeric series
+          if (type === 'line') {
+            const xCol = xDateCol || labelCol;
+            const x = plotRows.map(r => r[xCol]);
+            const seriesCols = numericCols.length ? numericCols : [cols[1]];
+            const traces = seriesCols.slice(0, 5).map(c => ({
+              x,
+              y: plotRows.map(r => toNumber(r[c])),
+              type: 'scatter',
+              mode: 'lines+markers',
+              name: c,
+            }));
+            draw(traces, { title: { text: `Trend by ${xCol}`, x: 0.02, font: { size: 14 } }, xaxis: { title: xCol } });
+            return;
+          }
+
+          // 4) Bar: if multiple numeric columns => grouped bars
+          // Pick a categorical x
+          const xCol = labelCol;
+          const x = plotRows.map(r => r[xCol]);
+          const yCols = numericCols.length ? numericCols : [cols[1]];
+          const traces = yCols.slice(0, 6).map(c => ({
+            x,
+            y: plotRows.map(r => toNumber(r[c])),
+            type: 'bar',
+            name: c,
+          }));
+          const barLayout = { barmode: yCols.length > 1 ? 'group' : 'relative', title: { text: `Bar by ${xCol}`, x: 0.02, font: { size: 14 } }, xaxis: { title: xCol } };
+          draw(traces, barLayout);
         } catch (e) {
           errEl.textContent = String(e);
           statusEl.textContent = 'Failed';
