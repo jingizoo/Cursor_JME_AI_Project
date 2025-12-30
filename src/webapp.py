@@ -225,6 +225,8 @@ INDEX_HTML = """<!doctype html>
         const payload = { question };
         const chartType = ctEl.value.trim();
         if (chartType) payload.chart_type = chartType;
+        // Default to fast mode (avoid slow second-pass retries)
+        payload.retry_on_error = false;
 
         try {
           const res = await fetch('/api/ask-data', {

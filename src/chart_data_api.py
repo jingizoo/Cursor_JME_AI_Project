@@ -33,6 +33,7 @@ app = FastAPI(title="JME AI Finance Pipeline - Chart Data API")
 
 _DB_MTIME_CACHE: float | None = None
 _TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}
+_PLAN_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
 
 def df_to_records_safe(df: pd.DataFrame):
@@ -40,7 +41,7 @@ def df_to_records_safe(df: pd.DataFrame):
     return df.where(pd.notnull(df), None).to_dict(orient="records")
 
 def _maybe_invalidate_schema_cache() -> None:
-    global _DB_MTIME_CACHE, _TABLE_INFO_CACHE
+    global _DB_MTIME_CACHE, _TABLE_INFO_CACHE, _PLAN_CACHE
     try:
         mtime = DB_PATH.stat().st_mtime
     except Exception:
@@ -48,6 +49,7 @@ def _maybe_invalidate_schema_cache() -> None:
     if _DB_MTIME_CACHE != mtime:
         _DB_MTIME_CACHE = mtime
         _TABLE_INFO_CACHE = {}
+        _PLAN_CACHE = {}
 
 def _get_table_info_cached(con, table: str) -> list[dict[str, str]]:
     _maybe_invalidate_schema_cache()
@@ -113,7 +115,7 @@ def detect_chart_type(question: str, df: pd.DataFrame) -> str:
 class AskDataReq(BaseModel):
     question: str
     chart_type: Optional[str] = None  # bar/line/pie/auto
-    retry_on_error: bool = True
+    retry_on_error: bool = False
 
 
 @app.post("/ask-data")
@@ -121,7 +123,16 @@ def ask_data(req: AskDataReq):
     con = connect(DB_PATH)
     try:
         schema = _schema_for_llm(con, req.question)
-        plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
+        # Cache SQL plan by (question, model) for speed on repeat queries.
+        cache_key = (req.question.strip(), OLLAMA_MODEL)
+        cached = _PLAN_CACHE.get(cache_key)
+        if cached and cached.get("sql"):
+            sql = cached["sql"]
+            plan = {"ok": True, "sql": sql, "notes": cached.get("notes", "")}
+        else:
+            plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
+            if plan.get("ok") and plan.get("sql"):
+                _PLAN_CACHE[cache_key] = {"sql": plan["sql"], "notes": plan.get("notes", "")}
         if not plan.get("ok"):
             return plan
         sql = plan["sql"]
@@ -142,6 +153,7 @@ def ask_data(req: AskDataReq):
                         df = con.execute(sql2).df()
                         sql = sql2
                         plan = plan2
+                        _PLAN_CACHE[cache_key] = {"sql": sql2, "notes": plan2.get("notes", "")}
                     except Exception as e2:
                         return {"ok": False, "error": f"SQL execution failed: {e2}", "sql": sql2, "plan_raw": plan2.get("raw", "")}
                 else:
