@@ -13,13 +13,13 @@ Then open:
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-from .chart_api import app as chart_api_app
+from .chart_data_api import app as chart_data_api_app
 
 
 app = FastAPI(title="JME AI Finance Pipeline - Web UI")
 
-# Mount existing chart API so the browser can call it same-origin
-app.mount("/api", chart_api_app)
+# Mount lightweight data API so the browser can call it same-origin (no matplotlib required)
+app.mount("/api", chart_data_api_app)
 
 
 INDEX_HTML = """<!doctype html>
@@ -28,31 +28,33 @@ INDEX_HTML = """<!doctype html>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>JME AI Chart UI</title>
+    <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
     <style>
       :root { color-scheme: light; }
-      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #0b1020; color: #e8ecff; }
-      .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
-      .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; }
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #f6f7fb; color: #121826; }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 24px; }
+      .card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px; box-shadow: 0 6px 18px rgba(18,24,38,0.06); }
+      /* Vertical layout: question/results first, chart below */
       .row { display: grid; grid-template-columns: 1fr; gap: 14px; }
-      @media (min-width: 980px) { .row { grid-template-columns: 1.2fr 0.8fr; } }
       h1 { font-size: 18px; margin: 0 0 10px; }
-      label { font-size: 12px; opacity: 0.9; }
-      textarea { width: 100%; min-height: 80px; resize: vertical; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.25); color: #e8ecff; }
-      select, button { padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.25); color: #e8ecff; }
-      button { cursor: pointer; background: #4c6fff; border-color: rgba(255,255,255,0.12); }
+      label { font-size: 12px; color: #374151; }
+      textarea { width: 100%; min-height: 84px; resize: vertical; padding: 12px; border-radius: 12px; border: 1px solid #d1d5db; background: #ffffff; color: #111827; }
+      select, button { padding: 10px 12px; border-radius: 12px; border: 1px solid #d1d5db; background: #ffffff; color: #111827; }
+      button { cursor: pointer; background: #2563eb; border-color: #1d4ed8; color: #ffffff; }
       button:disabled { opacity: 0.6; cursor: not-allowed; }
       .actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
-      .muted { opacity: 0.8; font-size: 12px; }
-      .err { color: #ff9aa8; white-space: pre-wrap; }
-      .hint { color: #ffd27a; white-space: pre-wrap; }
-      .ok { color: #b7ffc3; }
-      .imgwrap { display: flex; justify-content: center; background: rgba(0,0,0,0.25); border: 1px dashed rgba(255,255,255,0.16); border-radius: 14px; padding: 12px; }
-      img { max-width: 100%; height: auto; border-radius: 10px; }
+      .muted { color: #6b7280; font-size: 12px; }
+      .err { color: #b42318; white-space: pre-wrap; }
+      .hint { color: #92400e; white-space: pre-wrap; }
+      .ok { color: #067647; }
+      .imgwrap { display: flex; justify-content: center; background: #f9fafb; border: 1px dashed #d1d5db; border-radius: 14px; padding: 12px; overflow: auto; }
+      img { max-width: 860px; width: 100%; height: auto; max-height: 560px; object-fit: contain; border-radius: 10px; }
+      #plot { width: 100%; height: 520px; }
       code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-      pre { background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); padding: 10px; border-radius: 12px; overflow: auto; }
+      pre { background: #0b1220; color: #e5e7eb; border: 1px solid #111827; padding: 10px; border-radius: 12px; overflow: auto; }
       table { width: 100%; border-collapse: collapse; font-size: 12px; }
-      th, td { border-bottom: 1px solid rgba(255,255,255,0.12); padding: 8px; text-align: left; vertical-align: top; }
-      th { position: sticky; top: 0; background: rgba(11,16,32,0.9); }
+      th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }
+      th { position: sticky; top: 0; background: #ffffff; }
     </style>
   </head>
   <body>
@@ -83,17 +85,19 @@ INDEX_HTML = """<!doctype html>
               <pre id="sql"></pre>
             </div>
           </div>
-          <div>
-            <div class="muted">Chart</div>
-            <div class="imgwrap" style="margin-top:8px">
-              <img id="img" alt="Chart will appear here" style="display:none" />
-              <div id="noimg" class="muted">No chart yet</div>
-            </div>
-            <div style="margin-top:12px">
-              <div class="muted">Notes</div>
-              <pre id="notes"></pre>
-            </div>
+        </div>
+
+        <div style="margin-top:14px">
+          <div class="muted">Chart</div>
+          <div class="imgwrap" style="margin-top:8px">
+            <div id="noimg" class="muted">No chart yet</div>
+            <div id="plot"></div>
           </div>
+        </div>
+
+        <div style="margin-top:12px">
+          <div class="muted">Notes</div>
+          <pre id="notes"></pre>
         </div>
       </div>
 
@@ -114,6 +118,7 @@ INDEX_HTML = """<!doctype html>
       const notesEl = document.getElementById('notes');
       const imgEl = document.getElementById('img');
       const noimgEl = document.getElementById('noimg');
+      const plotEl = document.getElementById('plot');
       const tableWrap = document.getElementById('tableWrap');
 
       function escapeHtml(s) {
@@ -147,8 +152,8 @@ INDEX_HTML = """<!doctype html>
         hintEl.textContent = '';
         sqlEl.textContent = '';
         notesEl.textContent = '';
-        imgEl.style.display = 'none';
         noimgEl.style.display = 'block';
+        plotEl.innerHTML = '';
         tableWrap.innerHTML = '';
 
         askBtn.disabled = true;
@@ -159,7 +164,7 @@ INDEX_HTML = """<!doctype html>
         if (chartType) payload.chart_type = chartType;
 
         try {
-          const res = await fetch('/api/ask-chart', {
+          const res = await fetch('/api/ask-data', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -183,13 +188,35 @@ INDEX_HTML = """<!doctype html>
           const rows = data.data || [];
           renderTable(rows.slice(0, 200));
 
-          if (data.chart && data.chart.image_base64) {
-            imgEl.src = 'data:image/png;base64,' + data.chart.image_base64;
-            imgEl.style.display = 'block';
-            noimgEl.style.display = 'none';
+          // Render interactive chart using Plotly (first 2 columns)
+          if (rows.length > 0 && data.chart && data.chart.type && rows[0]) {
+            const cols = Object.keys(rows[0]);
+            if (cols.length >= 2) {
+              const x = rows.map(r => r[cols[0]]);
+              const y = rows.map(r => r[cols[1]]);
+              const type = data.chart.type;
+              let trace = null;
+              if (type === 'line') {
+                trace = { x, y, type: 'scatter', mode: 'lines+markers' };
+              } else if (type === 'pie') {
+                trace = { labels: x, values: y, type: 'pie' };
+              } else {
+                trace = { x, y, type: 'bar' };
+              }
+              const layout = {
+                margin: { l: 50, r: 20, t: 30, b: 120 },
+                xaxis: { automargin: true, tickangle: -35 },
+                yaxis: { automargin: true },
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+              };
+              Plotly.newPlot(plotEl, [trace], layout, { responsive: true, displaylogo: false });
+              noimgEl.style.display = 'none';
+            } else {
+              noimgEl.textContent = 'Not enough columns to chart (need at least 2).';
+            }
           } else {
-            noimgEl.textContent = 'No chart (empty result or chart generation skipped)';
-            noimgEl.style.display = 'block';
+            noimgEl.textContent = 'No chart (empty result).';
           }
         } catch (e) {
           errEl.textContent = String(e);
