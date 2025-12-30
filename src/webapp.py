@@ -188,6 +188,54 @@ INDEX_HTML = """<!doctype html>
         return { numericCols, dateCols, textCols };
       }
 
+      function splitNumericIntoDimsAndMeasures(rows, numericCols) {
+        // Treat date-part integers and low-cardinality numeric columns as dimensions.
+        const sampleN = Math.min(rows.length, 200);
+        const dim = [];
+        const measure = [];
+
+        const nameIsDatePart = (c) => {
+          const s = String(c).toLowerCase();
+          return (
+            s === 'year' || s === 'month' || s === 'week' || s === 'day' ||
+            s.endsWith('_year') || s.endsWith('_month') || s.endsWith('_week') || s.endsWith('_day') ||
+            s.includes('fiscal_year') || s.includes('fy') || s.includes('yyyymm')
+          );
+        };
+
+        for (const c of numericCols) {
+          const vals = [];
+          for (let i = 0; i < sampleN; i++) {
+            const n = toNumber(rows[i]?.[c]);
+            if (n === null) continue;
+            vals.push(n);
+          }
+          const uniq = new Set(vals.map(v => String(v))).size;
+
+          // Heuristics:
+          // - year/month/week/day are dimensions
+          // - low-cardinality numeric columns are likely categories (e.g. month=1..12)
+          if (nameIsDatePart(c) || uniq <= 24) dim.push(c);
+          else measure.push(c);
+        }
+        return { numericDimCols: dim, numericMeasureCols: measure };
+      }
+
+      function pad2(n) {
+        const s = String(n);
+        return s.length === 1 ? '0' + s : s;
+      }
+
+      function buildTimeKey(rows, yCol, mCol) {
+        // Build YYYY-MM from numeric columns if present
+        return rows.map(r => {
+          const y = toNumber(r?.[yCol]);
+          const m = toNumber(r?.[mCol]);
+          if (y === null || m === null) return null;
+          return `${Math.trunc(y)}-${pad2(Math.trunc(m))}`;
+        });
+      }
+
       function scaleSizes(vals) {
         // vals: array<number|null>
         const nums = vals.filter(v => typeof v === 'number' && Number.isFinite(v));
@@ -269,6 +317,8 @@ INDEX_HTML = """<!doctype html>
           const requested = (data.chart && data.chart.type) ? data.chart.type : 'auto';
           const type = requested || 'auto';
 
+          const { numericDimCols, numericMeasureCols } = splitNumericIntoDimsAndMeasures(rows, numericCols);
+
           // Limit points for scatter/bubble to keep UI snappy
           const maxPoints = 800;
           const plotRows = rows.length > maxPoints ? rows.slice(0, maxPoints) : rows;
@@ -283,7 +333,8 @@ INDEX_HTML = """<!doctype html>
           };
 
           // Auto-pick columns
-          const labelCol = textCols[0] || cols[0];
+          const dimCols = [...dateCols, ...numericDimCols, ...textCols];
+          const labelCol = dimCols[0] || cols[0];
           const xDateCol = dateCols[0] || null;
 
           function draw(traces, layout) {
@@ -292,18 +343,18 @@ INDEX_HTML = """<!doctype html>
           }
 
           // 1) Bubble / scatter
-          const autoWantsBubble = (type === 'auto' && numericCols.length >= 3 && cols.length >= 3);
+          const autoWantsBubble = (type === 'auto' && numericMeasureCols.length >= 3 && cols.length >= 3);
           const wantsBubble = (type === 'bubble') || autoWantsBubble;
-          const wantsScatter = (type === 'scatter') || (type === 'auto' && numericCols.length >= 2 && cols.length >= 3);
+          const wantsScatter = (type === 'scatter') || (type === 'auto' && numericMeasureCols.length >= 2 && cols.length >= 3);
 
           if (wantsBubble || wantsScatter) {
-            if (numericCols.length < 2) {
+            if (numericMeasureCols.length < 2) {
               noimgEl.textContent = 'Need at least 2 numeric columns for scatter/bubble.';
               return;
             }
-            const xCol = numericCols[0];
-            const yCol = numericCols[1];
-            const sizeCol = numericCols[2] || null;
+            const xCol = numericMeasureCols[0];
+            const yCol = numericMeasureCols[1];
+            const sizeCol = numericMeasureCols[2] || null;
             const textCol = textCols[0] || null;
 
             const x = [];
@@ -348,7 +399,7 @@ INDEX_HTML = """<!doctype html>
 
           // 2) Pie (label + value)
           if (type === 'pie') {
-            const valCol = numericCols[0] || cols[1];
+            const valCol = numericMeasureCols[0] || numericCols[0] || cols[1];
             const labels = plotRows.map(r => r[labelCol]);
             const values = plotRows.map(r => toNumber(r[valCol]) ?? 0);
             draw([{ type: 'pie', labels, values, textinfo: 'label+percent' }], { title: { text: `Pie: ${valCol} by ${labelCol}`, x: 0.02, font: { size: 14 } } });
@@ -357,9 +408,18 @@ INDEX_HTML = """<!doctype html>
 
           // 3) Line: date/time x if available, otherwise label x; support multiple numeric series
           if (type === 'line') {
-            const xCol = xDateCol || labelCol;
-            const x = plotRows.map(r => r[xCol]);
-            const seriesCols = numericCols.length ? numericCols : [cols[1]];
+            // Prefer (year, month) -> YYYY-MM if present
+            const hasYear = numericDimCols.map(c => c.toLowerCase()).includes('year');
+            const hasMonth = numericDimCols.map(c => c.toLowerCase()).includes('month');
+            let xCol = xDateCol || labelCol;
+            let x = plotRows.map(r => r[xCol]);
+            if (!xDateCol && hasYear && hasMonth) {
+              const yCol = numericDimCols.find(c => c.toLowerCase() === 'year');
+              const mCol = numericDimCols.find(c => c.toLowerCase() === 'month');
+              xCol = 'period';
+              x = buildTimeKey(plotRows, yCol, mCol);
+            }
+            const seriesCols = numericMeasureCols.length ? numericMeasureCols : (numericCols.length ? numericCols : [cols[1]]);
             const traces = seriesCols.slice(0, 5).map(c => ({
               x,
               y: plotRows.map(r => toNumber(r[c])),
@@ -373,9 +433,18 @@ INDEX_HTML = """<!doctype html>
 
           // 4) Bar: if multiple numeric columns => grouped bars
           // Pick a categorical x
-          const xCol = labelCol;
-          const x = plotRows.map(r => r[xCol]);
-          const yCols = numericCols.length ? numericCols : [cols[1]];
+          // Prefer (year, month) -> YYYY-MM if present
+          const hasYear = numericDimCols.map(c => c.toLowerCase()).includes('year');
+          const hasMonth = numericDimCols.map(c => c.toLowerCase()).includes('month');
+          let xCol = labelCol;
+          let x = plotRows.map(r => r[xCol]);
+          if (hasYear && hasMonth) {
+            const yCol = numericDimCols.find(c => c.toLowerCase() === 'year');
+            const mCol = numericDimCols.find(c => c.toLowerCase() === 'month');
+            xCol = 'period';
+            x = buildTimeKey(plotRows, yCol, mCol);
+          }
+          const yCols = numericMeasureCols.length ? numericMeasureCols : (numericCols.length ? numericCols : [cols[1]]);
           // If we have 2 categorical dimensions + 1 measure, use dim2 as series.
           if ((type === 'bar' || type === 'auto') && textCols.length >= 2 && yCols.length === 1) {
             const dim1 = textCols[0];
