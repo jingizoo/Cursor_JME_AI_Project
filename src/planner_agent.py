@@ -66,7 +66,7 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     pdf_context = []
     if include_pdf_context:
         try:
-            pdf_context = search_pdf_context(question, base_url=base_url, model="nomic-embed-text", top_k=3)
+            pdf_context = search_pdf_context(question, base_url=base_url, embedding_model="nomic-embed-text", top_k=3)
         except Exception as e:
             print(f"Warning: PDF context search failed: {e}")
     
