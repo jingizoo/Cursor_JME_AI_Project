@@ -71,33 +71,35 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
             print(f"Warning: PDF context search failed: {e}")
     
     # Build system prompt with PDF context if available
+    # Keep prompt SHORT to reduce LLM processing time
     system_parts = [
-        "You are a data analyst.\n",
-        "Given DB schema and a question, output ONLY JSON with a SQL query.\n",
-        "Rules: SELECT/CTE only (no writes). Add LIMIT 200.\n",
-        "Format: {\"intent\":\"sql\",\"sql\":\"...\",\"notes\":\"...\"}"
+        "You are a data analyst. Output ONLY JSON with SQL.\n",
+        "Rules: SELECT/CTE only. Add LIMIT 200.\n",
+        "Format: {\"sql\":\"SELECT ...\",\"notes\":\"...\"}\n"
     ]
     
     if pdf_context:
-        system_parts.append("\n\nRelevant context from PDF documents:")
-        for i, ctx in enumerate(pdf_context, 1):
-            system_parts.append(f"\n[{i}] From {ctx.get('source_file', 'unknown')} (page {ctx.get('page', 0)}):")
-            system_parts.append(f"   {ctx.get('text', '')[:300]}...")
-        system_parts.append("\n\nUse this context to better understand the question and data structure.")
+        # Keep PDF context brief to reduce prompt size
+        system_parts.append("\nPDF context:")
+        for i, ctx in enumerate(pdf_context[:2], 1):  # Limit to 2 contexts
+            system_parts.append(f"\n[{i}] {ctx.get('text', '')[:150]}...")  # Reduced from 300 to 150
     
     system = "".join(system_parts)
     
     # Build user message with schema and question
+    # Keep it compact - only essential info
     user_data = {"schema": schema, "question": question}
     if pdf_context:
-        user_data["pdf_context"] = [{"source": c.get("source_file"), "text": c.get("text", "")[:200]} for c in pdf_context]
+        # Limit PDF context in user message too
+        user_data["pdf_context"] = [{"text": c.get("text", "")[:100]} for c in pdf_context[:2]]  # Reduced size
     
-    user = json.dumps(user_data, ensure_ascii=False)
+    user = json.dumps(user_data, ensure_ascii=False, separators=(',', ':'))  # Compact JSON (no spaces)
     
+    # Use num_predict=512 to limit generation and speed up (SQL is usually short)
     text = ollama_chat(base_url=base_url, model=model, messages=[
         {"role":"system","content":system},
         {"role":"user","content":user}
-    ])
+    ], num_predict=512)  # Limit to 512 tokens for faster response
     obj = extract_json(text)
     
     # Better error handling for JSON extraction failures

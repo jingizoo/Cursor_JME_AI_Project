@@ -51,14 +51,17 @@ def _maybe_invalidate_schema_cache() -> None:
         _TABLE_INFO_CACHE = {}
         _PLAN_CACHE = {}
 
-def _get_table_info_cached(con, table: str) -> list[dict[str, str]]:
+def _get_table_info_cached(con, table: str, max_cols: int = 20) -> list[dict[str, str]]:
+    """Get table info with column limit to reduce prompt size."""
     _maybe_invalidate_schema_cache()
-    cached = _TABLE_INFO_CACHE.get(table)
+    cache_key = (table, max_cols)
+    cached = _TABLE_INFO_CACHE.get(cache_key)
     if cached is not None:
         return cached
     cols = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+    cols = cols[:max_cols]  # Limit columns
     out = [{"name": c[1], "type": c[2]} for c in cols]
-    _TABLE_INFO_CACHE[table] = out
+    _TABLE_INFO_CACHE[cache_key] = out
     return out
 
 def _schema_for_llm(con, question: str) -> dict:

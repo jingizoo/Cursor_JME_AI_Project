@@ -3,13 +3,26 @@ import re
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.0, timeout_sec: int = 600) -> str:
+def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.0, timeout_sec: int = 600, num_predict: int = 512) -> str:
     """
     Calls Ollama /api/chat.
     base_url example: http://localhost:11434 or http://<linux-ip>:11434
+    
+    Args:
+        num_predict: Maximum tokens to generate (default: 512). Lower = faster but may truncate.
+                    For SQL generation, 512 is usually enough.
     """
     url = base_url.rstrip("/") + "/api/chat"
-    payload = {"model": model, "messages": messages, "stream": False, "options": {"temperature": temperature}}
+    # Limit token generation to speed up response (SQL queries are usually short)
+    payload = {
+        "model": model, 
+        "messages": messages, 
+        "stream": False, 
+        "options": {
+            "temperature": temperature,
+            "num_predict": num_predict  # Limit generation to prevent long waits
+        }
+    }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout_sec) as r:

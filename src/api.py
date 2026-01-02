@@ -39,32 +39,45 @@ def _maybe_invalidate_schema_cache() -> None:
         _TABLE_INFO_CACHE = {}
         _PLAN_CACHE = {}  # Invalidate plan cache when DB changes
 
-def _get_table_info_cached(con, table: str) -> list[dict[str, str]]:
+def _get_table_info_cached(con, table: str, max_cols: int = 20) -> list[dict[str, str]]:
+    """
+    Get table info with column limit to reduce prompt size.
+    For very large tables, only include first max_cols columns.
+    """
     _maybe_invalidate_schema_cache()
-    cached = _TABLE_INFO_CACHE.get(table)
+    cache_key = (table, max_cols)
+    cached = _TABLE_INFO_CACHE.get(cache_key)
     if cached is not None:
         return cached
     cols = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+    # Limit columns to reduce prompt size (most important columns are usually first)
+    cols = cols[:max_cols]
     out = [{"name": c[1], "type": c[2]} for c in cols]
-    _TABLE_INFO_CACHE[table] = out
+    _TABLE_INFO_CACHE[cache_key] = out
     return out
 
-def _schema_for_llm(con, question: str) -> dict:
+def _schema_for_llm(con, question: str, max_tables: int = 5, max_cols_per_table: int = 15) -> dict:
     """
     Build a compact schema payload for the LLM to reduce prompt size / latency.
-    Includes canonical tables + a small set of most relevant/recent raw__ tables.
+    Aggressively limits tables and columns to speed up LLM generation.
+    
+    Args:
+        con: DuckDB connection
+        question: User question (used for relevance matching)
+        max_tables: Maximum number of tables to include (default: 5, was 8)
+        max_cols_per_table: Maximum columns per table (default: 15, was unlimited)
     """
-    # Always include canonical tables
-    base_tables = ["invoices", "payments", "expenses", "bank_txns", "schema_registry", "raw_sheet_registry"]
+    # Always include canonical tables (but limit to most important)
+    base_tables = ["invoices", "payments", "expenses", "bank_txns"]  # Removed registry tables
     existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
     existing_set = set(existing_tables)
 
-    # Pull recent raw tables (if registry exists)
+    # Pull recent raw tables (if registry exists) - but limit more aggressively
     recent_raw: list[str] = []
     if "raw_sheet_registry" in existing_set:
         try:
             rows = con.execute(
-                "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC LIMIT 25"
+                "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC LIMIT 10"  # Reduced from 25
             ).fetchall()
             recent_raw = [r[0] for r in rows if r and r[0]]
         except Exception:
@@ -79,16 +92,19 @@ def _schema_for_llm(con, question: str) -> dict:
             if any(tok in tlow for tok in tokens):
                 matched.append(tname)
 
-    selected_raw = (matched + recent_raw)[:8]  # keep it small
+    # Limit to fewer raw tables
+    selected_raw = (matched + recent_raw)[:max(1, max_tables - len(base_tables))]  # Only enough to fill remaining slots
 
     selected = []
     for t in base_tables + selected_raw:
         if t in existing_set and t not in selected:
             selected.append(t)
+        if len(selected) >= max_tables:
+            break
 
     tables: dict[str, list[dict[str, str]]] = {}
     for t in selected:
-        tables[t] = _get_table_info_cached(con, t)
+        tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
 
     return {"tables": tables}
 
