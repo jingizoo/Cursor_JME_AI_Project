@@ -1,6 +1,7 @@
 # src/quick_excel.py
 import io
 import json
+import os
 import re
 import hashlib
 from pathlib import Path
@@ -112,13 +113,23 @@ def plan_sql_one(*, base_url: str, model: str, schema: Dict[str, Any], question:
     user = json.dumps({"schema": schema, "question": question}, ensure_ascii=False)
 
     try:
+        # Use configurable num_predict limit
+        num_predict_limit = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
         text = ollama_chat(base_url=base_url, model=model, messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
-        ], temperature=0.0)
+        ], temperature=0.0, num_predict=num_predict_limit)
     except Exception as e:
-        return {"ok": False, "error": f"Ollama call failed: {e}", "created_tables": created_tables}
+        return {"ok": False, "error": f"Ollama call failed: {e}"}
 
+    # Handle empty response
+    if not text or not text.strip():
+        return {
+            "ok": False,
+            "error": "LLM returned empty response",
+            "raw": text or "(empty)"
+        }
+    
     obj = extract_json(text)
     
     # Better error handling for JSON extraction failures
@@ -137,7 +148,6 @@ def plan_sql_one(*, base_url: str, model: str, schema: Dict[str, Any], question:
                 return {
                     "ok": False, 
                     "error": "LLM response is not valid JSON and no SQL found",
-                    "created_tables": created_tables,
                     "raw": text[:1000]
                 }
     else:
@@ -146,7 +156,6 @@ def plan_sql_one(*, base_url: str, model: str, schema: Dict[str, Any], question:
             return {
                 "ok": False,
                 "error": "LLM returned JSON but no SQL field found",
-                "created_tables": created_tables,
                 "raw": text[:1000],
                 "parsed_json": obj
             }
@@ -156,13 +165,12 @@ def plan_sql_one(*, base_url: str, model: str, schema: Dict[str, Any], question:
         return {
             "ok": False, 
             "error": "LLM produced unsafe/invalid SQL", 
-            "created_tables": created_tables,
             "raw": text[:1000],
             "sql_attempted": sql[:200]
         }
 
     sql = ensure_limit(sql, 200)
-    return {"ok": True, "sql": sql, "notes": obj.get("notes",""), "raw": text[:500], "created_tables": created_tables}
+    return {"ok": True, "sql": sql, "notes": obj.get("notes",""), "raw": text[:500]}
 
 def extract_pdf_tables_from_bytes(fbytes: bytes) -> List[Dict[str, Any]]:
     """Extract tables from PDF bytes. Returns list of {page, table_idx, df, sheet_name}."""

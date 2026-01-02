@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any, Dict
 
 import pandas as pd
@@ -38,10 +39,12 @@ def infer_sheet_mapping(*, base_url: str, model: str, file: str, sheet: str, sch
     )
     user = json.dumps({"file": file, "sheet": sheet, "schema": schema}, ensure_ascii=False)
 
+    # Use configurable num_predict limit
+    num_predict_limit = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
     text = ollama_chat(base_url=base_url, model=model, messages=[
         {"role":"system","content":system},
         {"role":"user","content":user},
-    ])
+    ], num_predict=num_predict_limit)
     obj = extract_json(text)
     if obj is None:
         # If JSON extraction fails, return empty dict (schema agent can handle this)

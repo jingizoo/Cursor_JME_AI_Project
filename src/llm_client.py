@@ -47,7 +47,7 @@ def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], te
                         # Model stopped naturally but content is empty - unusual
                         raise Exception(f"Ollama stopped but returned empty content (done_reason: {done_reason})")
                     elif done_reason == "length":
-                        raise Exception(f"Ollama hit token limit (num_predict={num_predict}) before generating content. Try increasing num_predict.")
+                        raise Exception(f"Ollama hit token limit (num_predict={num_predict}) before generating content. Set OLLAMA_NUM_PREDICT environment variable to increase (e.g., export OLLAMA_NUM_PREDICT=4096)")
                     else:
                         raise Exception(f"Ollama returned empty content (done_reason: {done_reason})")
                 

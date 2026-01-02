@@ -104,12 +104,14 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     user = json.dumps(user_data, ensure_ascii=False, separators=(',', ':'))  # Compact JSON (no spaces)
     
     # Use num_predict to limit generation and speed up (SQL is usually short)
-    # Increased to 1024 to ensure model has enough tokens (512 was too restrictive)
+    # Make it configurable via environment variable, default to 2048 for safety
+    num_predict_limit = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))  # Default 2048, was 1024
+    
     try:
         text = ollama_chat(base_url=base_url, model=model, messages=[
             {"role":"system","content":system},
             {"role":"user","content":user}
-        ], num_predict=1024)  # Increased from 512 to ensure complete responses
+        ], num_predict=num_predict_limit)
     except Exception as e:
         return {
             "ok": False,
@@ -128,7 +130,7 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
             "diagnostics": {
                 "response_length": len(text) if text else 0,
                 "model": model,
-                "num_predict": 1024
+                "num_predict": num_predict_limit
             }
         }
     
