@@ -41,10 +41,28 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
     json_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
     if json_block_match:
         candidate = json_block_match.group(1).strip()
+        # Clean up common issues
+        candidate = re.sub(r',\s*}', '}', candidate)
+        candidate = re.sub(r',\s*]', ']', candidate)
         try:
             return json.loads(candidate)
         except Exception:
-            pass
+            # Try to find complete JSON by counting braces
+            brace_count = 0
+            end_pos = -1
+            for i, char in enumerate(candidate):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_pos = i + 1
+                        break
+            if end_pos > 0:
+                try:
+                    return json.loads(candidate[:end_pos])
+                except Exception:
+                    pass
     
     # Strategy 2: Find the largest valid JSON object by counting braces
     brace_count = 0

@@ -74,11 +74,16 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     # Keep prompt SHORT to reduce LLM processing time
     # CRITICAL: Emphasize JSON-only output with no explanatory text
     system_parts = [
-        "You are a SQL generator. Output ONLY valid JSON, no other text.\n",
-        "Rules: SELECT/CTE only. Add LIMIT 200.\n",
-        "CRITICAL: Start response with { and end with }. No text before or after JSON.\n",
-        "Format: {\"sql\":\"SELECT ...\",\"notes\":\"...\"}\n",
-        "Example: {\"sql\":\"SELECT * FROM invoices LIMIT 200\",\"notes\":\"\"}\n"
+        "You are a SQL generator. Your response must be ONLY valid JSON.\n",
+        "CRITICAL RULES:\n",
+        "1. Start your response with { (opening brace)\n",
+        "2. End your response with } (closing brace)\n",
+        "3. NO text before the opening brace\n",
+        "4. NO text after the closing brace\n",
+        "5. NO explanations, NO comments, NO markdown\n",
+        "6. Output ONLY: {\"sql\":\"SELECT ...\",\"notes\":\"...\"}\n",
+        "Example correct response: {\"sql\":\"SELECT * FROM invoices LIMIT 200\",\"notes\":\"\"}\n",
+        "Rules: SELECT/CTE only. Add LIMIT 200.\n"
     ]
     
     if pdf_context:
@@ -111,18 +116,24 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
         
         # Strategy 1: Try to find JSON after removing common prefixes
         # Remove common LLM prefixes like "Here's the SQL:", "The query is:", etc.
-        cleaned_text = text
+        cleaned_text = text.strip()
         prefixes_to_remove = [
-            r'^(here\'?s?|the|this is|below is|following is).*?:\s*',
-            r'^(json|sql|query|response|answer).*?:\s*',
+            r'^(here\'?s?|the|this is|below is|following is|i\'?ll|let me).*?:\s*',
+            r'^(json|sql|query|response|answer|result).*?:\s*',
             r'^```(?:json|sql)?\s*',
             r'```\s*$',
+            r'^[^{]*',  # Remove everything before first {
         ]
         for pattern in prefixes_to_remove:
-            cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE | re.MULTILINE)
+            cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        
+        # Remove everything after last }
+        cleaned_text = re.sub(r'}[^}]*$', '}', cleaned_text, flags=re.DOTALL)
+        cleaned_text = cleaned_text.strip()
         
         # Try to extract JSON from cleaned text
-        obj = extract_json(cleaned_text)
+        if cleaned_text:
+            obj = extract_json(cleaned_text)
         
         if obj is None:
             # Strategy 2: Extract SQL directly from markdown code blocks
@@ -132,30 +143,52 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
                 # Remove markdown formatting if present
                 sql = re.sub(r'^```(?:sql)?\s*', '', sql, flags=re.IGNORECASE)
                 sql = re.sub(r'\s*```\s*$', '', sql)
-                obj = {"sql": sql, "notes": "Extracted from markdown code block"}
-            else:
-                # Strategy 3: Look for SQL after common prefixes
-                sql_match = re.search(r'(?:sql|query|select).*?:\s*(SELECT.*?)(?:\n\n|$|\Z)', text, re.DOTALL | re.IGNORECASE)
-                if sql_match:
-                    sql = sql_match.group(1).strip()
-                    # Clean up SQL
-                    sql = sql.rstrip(';').strip()
+                sql = sql.rstrip(';').strip()
+                if sql and sql.upper().startswith('SELECT'):
+                    obj = {"sql": sql, "notes": "Extracted from markdown code block"}
+        
+        if obj is None:
+            # Strategy 3: Look for SQL after common prefixes
+            sql_match = re.search(r'(?:sql|query|select|here\'?s? the sql).*?:\s*(SELECT\s+.*?)(?:\n\n|$|\Z|```)', text, re.DOTALL | re.IGNORECASE)
+            if sql_match:
+                sql = sql_match.group(1).strip()
+                # Clean up SQL
+                sql = sql.rstrip(';').strip()
+                sql = re.sub(r'\s*```\s*$', '', sql)  # Remove trailing ```
+                if sql and sql.upper().startswith('SELECT'):
                     obj = {"sql": sql, "notes": "Extracted from text response"}
-                else:
-                    # Strategy 4: Try to find any SELECT statement
-                    sql_match = re.search(r'(SELECT\s+.*?)(?:\n\n|$|\Z)', text, re.DOTALL | re.IGNORECASE)
-                    if sql_match:
-                        sql = sql_match.group(1).strip()
-                        sql = sql.rstrip(';').strip()
-                        obj = {"sql": sql, "notes": "Extracted SELECT statement from response"}
-                    else:
-                        return {
-                            "ok": False, 
-                            "error": "LLM response is not valid JSON and no SQL found. The response may contain explanatory text before/after the JSON.",
-                            "raw": text[:1500],  # Show more context
-                            "hint": "The LLM may have added text before/after the JSON. Check the 'raw' field for the full response. Consider using a smaller model or adjusting the prompt.",
-                            "cleaned_attempt": cleaned_text[:500]  # Show cleaned version
-                        }
+        
+        if obj is None:
+            # Strategy 4: Try to find any SELECT statement (most permissive)
+            sql_match = re.search(r'(SELECT\s+[^;]+)', text, re.DOTALL | re.IGNORECASE)
+            if sql_match:
+                sql = sql_match.group(1).strip()
+                sql = sql.rstrip(';').strip()
+                sql = re.sub(r'\s*```\s*$', '', sql)  # Remove trailing ```
+                # Remove any trailing explanatory text
+                sql = re.sub(r'\s+[^S].*$', '', sql, flags=re.DOTALL)  # Stop at non-SQL text
+                if sql and sql.upper().startswith('SELECT') and len(sql) > 10:
+                    obj = {"sql": sql, "notes": "Extracted SELECT statement from response"}
+        
+        if obj is None:
+            # Strategy 5: Try to extract from JSON-like structure even if malformed
+            # Look for {"sql": pattern
+            json_like_match = re.search(r'\{\s*["\']?sql["\']?\s*:\s*["\']([^"\']+)["\']', text, re.IGNORECASE)
+            if json_like_match:
+                sql = json_like_match.group(1).strip()
+                if sql and sql.upper().startswith('SELECT'):
+                    obj = {"sql": sql, "notes": "Extracted from JSON-like structure"}
+        
+        if obj is None:
+            # Final fallback: return detailed error
+            return {
+                "ok": False, 
+                "error": "LLM response is not valid JSON and no SQL found. The response may contain explanatory text before/after the JSON.",
+                "raw": text[:2000],  # Show more context
+                "hint": "The LLM may have added text before/after the JSON. Check the 'raw' field for the full response. Consider using a smaller model or adjusting the prompt.",
+                "cleaned_attempt": cleaned_text[:500] if cleaned_text else "No cleaned text",  # Show cleaned version
+                "extraction_attempts": "Tried: JSON extraction, markdown blocks, text patterns, SELECT statements, JSON-like structures"
+            }
     else:
         sql = obj.get("sql", "")
         if not sql:
