@@ -120,7 +120,7 @@ class AskDataReq(BaseModel):
 
 @app.post("/ask-data")
 def ask_data(req: AskDataReq):
-    con = connect(DB_PATH)
+    con = connect(DB_PATH, read_only=True)
     try:
         schema = _schema_for_llm(con, req.question)
         # Cache SQL plan by (question, model) for speed on repeat queries.

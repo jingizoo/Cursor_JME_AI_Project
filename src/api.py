@@ -183,12 +183,15 @@ def ingest(req: IngestReq):
 
 @app.get("/catalog")
 def catalog():
-    con = connect(DB_PATH)
-    rows = con.execute("SELECT file, sheet, sheet_type, confidence, notes, updated_ts FROM schema_registry ORDER BY updated_ts DESC").fetchall()
-    out = []
-    for r in rows:
-        out.append({"file": r[0], "sheet": r[1], "sheet_type": r[2], "confidence": float(r[3] or 0), "notes": r[4] or "", "updated_ts": r[5]})
-    return {"ok": True, "mappings": out}
+    con = connect(DB_PATH, read_only=True)
+    try:
+        rows = con.execute("SELECT file, sheet, sheet_type, confidence, notes, updated_ts FROM schema_registry ORDER BY updated_ts DESC").fetchall()
+        out = []
+        for r in rows:
+            out.append({"file": r[0], "sheet": r[1], "sheet_type": r[2], "confidence": float(r[3] or 0), "notes": r[4] or "", "updated_ts": r[5]})
+        return {"ok": True, "mappings": out}
+    finally:
+        con.close()
 
 @app.post("/ask")
 def ask(req: AskReq):
@@ -199,7 +202,8 @@ def ask(req: AskReq):
     start_time = time.time()
     timings = {}
     
-    con = connect(DB_PATH)
+    # Use read-only connection for queries to allow concurrent access
+    con = connect(DB_PATH, read_only=True)
     try:
         # Build schema (with timing)
         t0 = time.time()
@@ -311,7 +315,7 @@ def list_tables():
     List all available tables for Superset.
     Returns: {"tables": [{"name": "...", "schema": "..."}, ...]}
     """
-    con = connect(DB_PATH)
+    con = connect(DB_PATH, read_only=True)
     try:
         tables = con.execute("SHOW TABLES").fetchall()
         result = [{"name": t[0], "schema": "main"} for t in tables]
@@ -325,7 +329,7 @@ def get_schema_info():
     Get schema information for all tables.
     Returns: {"schema": {"table_name": [{"name": "col", "type": "..."}, ...]}}
     """
-    con = connect(DB_PATH)
+    con = connect(DB_PATH, read_only=True)
     try:
         schema = get_schema(con)
         return {"schema": schema["tables"]}
@@ -344,7 +348,7 @@ def get_table_data(
     Get data from a specific table with pagination and filtering.
     Superset-compatible endpoint.
     """
-    con = connect(DB_PATH)
+    con = connect(DB_PATH, read_only=True)
     try:
         # Validate table name exists
         tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
@@ -405,7 +409,7 @@ def execute_query(
     Execute a SQL SELECT query.
     Superset-compatible endpoint that accepts SQL via query parameter.
     """
-    con = connect(DB_PATH)
+    con = connect(DB_PATH, read_only=True)
     try:
         # Validate SQL
         if not validate_sql(sql):
@@ -436,7 +440,7 @@ def get_table_columns(table_name: str):
     Get column information for a specific table.
     Superset-compatible endpoint.
     """
-    con = connect(DB_PATH)
+    con = connect(DB_PATH, read_only=True)
     try:
         # Validate table exists
         tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]

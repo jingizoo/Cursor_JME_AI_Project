@@ -292,7 +292,7 @@ def ask_with_chart(req: ChartQuestionReq):
     - "show me revenue trends by month"
     - "what is the distribution of expenses by category"
     """
-    con = connect(DB_PATH)
+    con = connect(DB_PATH, read_only=True)
     try:
         # Get schema and plan SQL
         schema = _schema_for_llm(con, req.question)

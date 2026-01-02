@@ -1,10 +1,14 @@
 import json
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import duckdb
 import pandas as pd
+
+# Connection lock to prevent concurrent access issues
+_db_lock = threading.Lock()
 
 CANON_DDL = [
     """
@@ -85,10 +89,49 @@ CANON_DDL = [
     """,
 ]
 
-def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(str(db_path))
-    for ddl in CANON_DDL:
-        con.execute(ddl)
+def connect(db_path: Path, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """
+    Create a DuckDB connection with proper configuration for concurrent access.
+    
+    Args:
+        db_path: Path to DuckDB database file
+        read_only: If True, opens in read-only mode (allows concurrent reads)
+    
+    Returns:
+        DuckDB connection object
+    """
+    db_str = str(db_path)
+    
+    # DuckDB supports concurrent reads natively, but we need to:
+    # 1. Use separate connections for each request (already done)
+    # 2. Close connections quickly (done in finally blocks)
+    # 3. For writes, use locking to prevent conflicts
+    
+    if read_only:
+        # For read-only, try to use read_only mode if supported
+        # DuckDB allows multiple read connections simultaneously
+        try:
+            # Try read_only parameter (available in DuckDB 0.9.0+)
+            con = duckdb.connect(db_str, read_only=True)
+        except Exception:
+            # Fallback to regular connection if read_only not supported
+            # Still works for concurrent reads, just not explicitly read-only
+            con = duckdb.connect(db_str)
+    else:
+        # For write operations, use standard connection
+        # DuckDB handles write locks internally
+        con = duckdb.connect(db_str)
+    
+    # Execute DDL only for write connections
+    if not read_only:
+        with _db_lock:
+            for ddl in CANON_DDL:
+                try:
+                    con.execute(ddl)
+                except Exception:
+                    # Table might already exist, ignore
+                    pass
+    
     return con
 
 def upsert_mapping(con, rec: Dict[str, Any]) -> None:
