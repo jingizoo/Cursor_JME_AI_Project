@@ -117,16 +117,52 @@ def plan_sql_one(*, base_url: str, model: str, schema: Dict[str, Any], question:
             {"role": "user", "content": user},
         ], temperature=0.0)
     except Exception as e:
-        return {"ok": False, "error": f"Ollama call failed: {e}"}
+        return {"ok": False, "error": f"Ollama call failed: {e}", "created_tables": created_tables}
 
-    obj = extract_json(text) or {}
-    sql = (obj.get("sql") or "").strip()
+    obj = extract_json(text)
+    
+    # Better error handling for JSON extraction failures
+    if obj is None:
+        # Try to extract SQL directly if JSON extraction failed
+        sql_match = re.search(r'```(?:sql)?\s*(SELECT.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
+        if sql_match:
+            sql = sql_match.group(1).strip()
+            obj = {"sql": sql, "notes": "Extracted from markdown code block"}
+        else:
+            sql_match = re.search(r'(?:sql|query):\s*(SELECT.*?)(?:\n\n|\Z)', text, re.DOTALL | re.IGNORECASE)
+            if sql_match:
+                sql = sql_match.group(1).strip()
+                obj = {"sql": sql, "notes": "Extracted from text response"}
+            else:
+                return {
+                    "ok": False, 
+                    "error": "LLM response is not valid JSON and no SQL found",
+                    "created_tables": created_tables,
+                    "raw": text[:1000]
+                }
+    else:
+        sql = obj.get("sql", "")
+        if not sql:
+            return {
+                "ok": False,
+                "error": "LLM returned JSON but no SQL field found",
+                "created_tables": created_tables,
+                "raw": text[:1000],
+                "parsed_json": obj
+            }
 
+    sql = (sql or "").strip()
     if not validate_sql(sql):
-        return {"ok": False, "error": "LLM produced unsafe/invalid SQL", "raw": text[:800]}
+        return {
+            "ok": False, 
+            "error": "LLM produced unsafe/invalid SQL", 
+            "created_tables": created_tables,
+            "raw": text[:1000],
+            "sql_attempted": sql[:200]
+        }
 
     sql = ensure_limit(sql, 200)
-    return {"ok": True, "sql": sql, "notes": obj.get("notes",""), "raw": text[:500]}
+    return {"ok": True, "sql": sql, "notes": obj.get("notes",""), "raw": text[:500], "created_tables": created_tables}
 
 def extract_pdf_tables_from_bytes(fbytes: bytes) -> List[Dict[str, Any]]:
     """Extract tables from PDF bytes. Returns list of {page, table_idx, df, sheet_name}."""

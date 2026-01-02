@@ -42,7 +42,10 @@ def infer_sheet_mapping(*, base_url: str, model: str, file: str, sheet: str, sch
         {"role":"system","content":system},
         {"role":"user","content":user},
     ])
-    obj = extract_json(text) or {}
+    obj = extract_json(text)
+    if obj is None:
+        # If JSON extraction fails, return empty dict (schema agent can handle this)
+        obj = {}
     st = obj.get("sheet_type","unknown")
     if st not in SHEET_TYPES:
         st = "unknown"

@@ -98,10 +98,46 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
         {"role":"system","content":system},
         {"role":"user","content":user}
     ])
-    obj = extract_json(text) or {}
-    sql = obj.get("sql","")
+    obj = extract_json(text)
+    
+    # Better error handling for JSON extraction failures
+    if obj is None:
+        # Try to extract SQL directly if JSON extraction failed
+        # Look for SQL in markdown code blocks
+        sql_match = re.search(r'```(?:sql)?\s*(SELECT.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
+        if sql_match:
+            sql = sql_match.group(1).strip()
+            obj = {"sql": sql, "notes": "Extracted from markdown code block"}
+        else:
+            # Look for SQL after common prefixes
+            sql_match = re.search(r'(?:sql|query):\s*(SELECT.*?)(?:\n\n|\Z)', text, re.DOTALL | re.IGNORECASE)
+            if sql_match:
+                sql = sql_match.group(1).strip()
+                obj = {"sql": sql, "notes": "Extracted from text response"}
+            else:
+                return {
+                    "ok": False, 
+                    "error": "LLM response is not valid JSON and no SQL found. The response may contain explanatory text before/after the JSON.",
+                    "raw": text[:1000],
+                    "hint": "The LLM may have added text before/after the JSON. Check the 'raw' field for the full response."
+                }
+    else:
+        sql = obj.get("sql", "")
+        if not sql:
+            return {
+                "ok": False,
+                "error": "LLM returned JSON but no SQL field found",
+                "raw": text[:1000],
+                "parsed_json": obj
+            }
+    
     if not validate_sql(sql):
-        return {"ok": False, "error": "LLM produced unsafe/invalid SQL", "raw": text[:800]}
+        return {
+            "ok": False, 
+            "error": "LLM produced unsafe/invalid SQL", 
+            "raw": text[:1000],
+            "sql_attempted": sql[:200]
+        }
     
     # Enforce LIMIT even if LLM forgets (performance optimization)
     sql = ensure_limit(sql, limit=200)
