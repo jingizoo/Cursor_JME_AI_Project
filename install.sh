@@ -4,7 +4,7 @@
 
 set -e  # Exit on error
 
-echo "🚀 JME AI Finance Pipeline - Installation Script"
+echo "🚀 AI Finance Pipeline - Installation Script"
 echo "================================================"
 echo ""
 
@@ -237,3 +237,5 @@ echo "  - VECTOR_DB_README.md"
 echo "  - WIKI_INGESTION_README.md"
 echo ""
 
+export OLLAMA_MODEL=qwen3:4b  # Smaller, faster model
+#export JME_DISABLE_PDF_CONTEXT=1  # Skip PDF context

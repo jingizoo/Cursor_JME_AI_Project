@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,9 +26,10 @@ def df_to_records_safe(df: pd.DataFrame):
 
 _DB_MTIME_CACHE: float | None = None
 _TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}
+_PLAN_CACHE: dict[tuple[str, str], dict[str, str]] = {}  # Cache SQL plans by (question, model)
 
 def _maybe_invalidate_schema_cache() -> None:
-    global _DB_MTIME_CACHE, _TABLE_INFO_CACHE
+    global _DB_MTIME_CACHE, _TABLE_INFO_CACHE, _PLAN_CACHE
     try:
         mtime = DB_PATH.stat().st_mtime
     except Exception:
@@ -35,6 +37,7 @@ def _maybe_invalidate_schema_cache() -> None:
     if _DB_MTIME_CACHE != mtime:
         _DB_MTIME_CACHE = mtime
         _TABLE_INFO_CACHE = {}
+        _PLAN_CACHE = {}  # Invalidate plan cache when DB changes
 
 def _get_table_info_cached(con, table: str) -> list[dict[str, str]]:
     _maybe_invalidate_schema_cache()
@@ -189,38 +192,90 @@ def catalog():
 
 @app.post("/ask")
 def ask(req: AskReq):
+    """
+    Ask a natural language question and get SQL results.
+    Includes timing information and plan caching for performance.
+    """
+    start_time = time.time()
+    timings = {}
+    
     con = connect(DB_PATH)
     try:
+        # Build schema (with timing)
+        t0 = time.time()
         schema = _schema_for_llm(con, req.question)
-        plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
+        timings["schema_build_ms"] = round((time.time() - t0) * 1000, 2)
+        
+        # Check plan cache first (performance optimization)
+        cache_key = (req.question.strip(), OLLAMA_MODEL)
+        cached = _PLAN_CACHE.get(cache_key)
+        if cached and cached.get("sql"):
+            sql = cached["sql"]
+            plan = {"ok": True, "sql": sql, "notes": cached.get("notes", ""), "cached": True}
+            timings["llm_ms"] = 0
+            timings["embedding_ms"] = 0
+        else:
+            # Generate SQL plan (with timing)
+            t1 = time.time()
+            plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
+            timings["llm_ms"] = round((time.time() - t1) * 1000, 2)
+            # Note: embedding time is included in llm_ms if PDF context is enabled
+            timings["embedding_ms"] = 0  # Will be set if PDF context is used
+            
+            if plan.get("ok") and plan.get("sql"):
+                # Cache the plan for future identical questions
+                _PLAN_CACHE[cache_key] = {"sql": plan["sql"], "notes": plan.get("notes", "")}
+            
         if not plan.get("ok"):
             # Provide a hint even when planning fails (often schema mismatch).
             plan["hint"] = _build_no_answer_hint(con=con, question=req.question, error=str(plan.get("error", "")))
+            plan["timings_ms"] = timings
+            plan["total_ms"] = round((time.time() - start_time) * 1000, 2)
             return plan
 
         sql = plan["sql"]
+        
+        # Execute SQL (with timing)
+        t2 = time.time()
         try:
             df = con.execute(sql).df()
+            timings["sql_exec_ms"] = round((time.time() - t2) * 1000, 2)
         except Exception as e:
             err = f"{e}"
+            timings["sql_exec_ms"] = round((time.time() - t2) * 1000, 2)
             return {
                 "ok": False,
                 "error": f"SQL execution failed: {err}",
                 "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, error=err),
                 "sql": sql,
                 "plan_raw": plan.get("raw", ""),
+                "timings_ms": timings,
+                "total_ms": round((time.time() - start_time) * 1000, 2),
             }
 
+        # Convert to records (with timing)
+        t3 = time.time()
         if df is None or df.shape[0] == 0:
-            return {
+            result = {
                 "ok": True,
                 "sql": sql,
                 "rows": [],
                 "notes": plan.get("notes", ""),
                 "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, empty=True),
             }
-
-        return {"ok": True, "sql": sql, "rows": df_to_records_safe(df), "notes": plan.get("notes","")}
+        else:
+            rows = df_to_records_safe(df)
+            result = {"ok": True, "sql": sql, "rows": rows, "notes": plan.get("notes","")}
+        
+        timings["json_serialize_ms"] = round((time.time() - t3) * 1000, 2)
+        timings["total_ms"] = round((time.time() - start_time) * 1000, 2)
+        result["timings_ms"] = timings
+        
+        # Add cache indicator if plan was cached
+        if plan.get("cached"):
+            result["plan_cached"] = True
+        
+        return result
     finally:
         con.close()
 

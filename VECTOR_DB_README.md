@@ -191,3 +191,4 @@ Potential improvements:
 - Automatic re-indexing when PDFs are updated
 - Support for other document types (Word, HTML, etc.)
 
+

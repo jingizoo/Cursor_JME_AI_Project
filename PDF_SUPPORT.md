@@ -95,3 +95,4 @@ Or use the raw table name directly in SQL queries.
 - Same schema mapping logic applies (LLM determines sheet type)
 - Raw tables are created with naming: `raw__{filename}__page_{N}_table_{M}__{hash}`
 
+

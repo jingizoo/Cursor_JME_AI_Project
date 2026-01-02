@@ -180,3 +180,4 @@ Potential improvements:
 - Automatic wiki discovery from links
 - Support for other wiki platforms (Confluence, Notion, etc.)
 
+

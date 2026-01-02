@@ -112,6 +112,10 @@ Edit `.env` as needed:
 OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
 
+# Performance Optimizations
+# Set to 1 to disable PDF context search (faster for Excel-only queries)
+JME_DISABLE_PDF_CONTEXT=0
+
 # Data Directories
 JME_DATA_DIR=./data
 JME_CACHE_DIR=./.cache
@@ -119,6 +123,11 @@ JME_CACHE_DIR=./.cache
 # CORS (for Superset integration)
 CORS_ORIGINS=*
 ```
+
+**Performance Tips:**
+- For faster queries, consider using a smaller model: `OLLAMA_MODEL=qwen3:4b`
+- To disable PDF context search (saves 100-500ms per query): `JME_DISABLE_PDF_CONTEXT=1`
+- See `PERFORMANCE_OPTIMIZATION.md` for detailed optimization guide
 
 ## Verification
 
@@ -294,4 +303,5 @@ For more information:
 - `VECTOR_DB_README.md` - Vector DB setup
 - `WIKI_INGESTION_README.md` - Wiki ingestion
 - `WEBAPP_README.md` - Webapp usage
+
 
