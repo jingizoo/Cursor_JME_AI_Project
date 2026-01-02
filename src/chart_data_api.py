@@ -64,12 +64,12 @@ def _get_table_info_cached(con, table: str, max_cols: int = 20) -> list[dict[str
     _TABLE_INFO_CACHE[cache_key] = out
     return out
 
-def _schema_for_llm(con, question: str) -> dict:
+def _schema_for_llm(con, question: str, max_tables: int = 5, max_cols_per_table: int = 15) -> dict:
     """
     Compact schema payload -> improves speed and SQL accuracy by reducing noise.
-    Includes canonical tables + a small set of relevant/recent raw__ tables.
+    Aggressively limits tables and columns to speed up LLM generation.
     """
-    base_tables = ["invoices", "payments", "expenses", "bank_txns", "schema_registry", "raw_sheet_registry"]
+    base_tables = ["invoices", "payments", "expenses", "bank_txns"]  # Removed registry tables
     existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
     existing_set = set(existing_tables)
 
@@ -77,7 +77,7 @@ def _schema_for_llm(con, question: str) -> dict:
     if "raw_sheet_registry" in existing_set:
         try:
             rows = con.execute(
-                "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC LIMIT 25"
+                "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC LIMIT 10"  # Reduced from 25
             ).fetchall()
             recent_raw = [r[0] for r in rows if r and r[0]]
         except Exception:
@@ -91,15 +91,17 @@ def _schema_for_llm(con, question: str) -> dict:
             if any(tok in tlow for tok in tokens):
                 matched.append(tname)
 
-    selected_raw = (matched + recent_raw)[:8]
+    selected_raw = (matched + recent_raw)[:max(1, max_tables - len(base_tables))]
     selected = []
     for t in base_tables + selected_raw:
         if t in existing_set and t not in selected:
             selected.append(t)
+        if len(selected) >= max_tables:
+            break
 
     tables: dict[str, list[dict[str, str]]] = {}
     for t in selected:
-        tables[t] = _get_table_info_cached(con, t)
+        tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
     return {"tables": tables}
 
 def detect_chart_type(question: str, df: pd.DataFrame) -> str:
