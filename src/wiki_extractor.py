@@ -6,6 +6,7 @@ and prepare it for vector DB storage.
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from urllib.parse import unquote
 import json
 
 try:
@@ -77,12 +78,15 @@ def extract_wikipedia_content(page_title: str, api_key: Optional[str] = None) ->
 
 def extract_mediawiki_content(wiki_url: str, page_title: str, api_key: Optional[str] = None) -> Dict[str, Any]:
     """
-    Extract content from a MediaWiki-based wiki.
+    Extract content from a MediaWiki-based wiki (supports internal wikis).
     
     Args:
-        wiki_url: Base URL of the wiki (e.g., "https://wiki.example.com")
+        wiki_url: Base URL of the wiki (e.g., "https://wiki.example.com" or "https://internal-wiki.company.com")
         page_title: Page title to extract
-        api_key: Optional API key if required
+        api_key: Optional API key/token for authentication. Can be:
+            - Bearer token: "Bearer <token>"
+            - API key: "<key>"
+            - Cookie string: "session=<session_id>; token=<token>"
     
     Returns:
         Dict with 'ok', 'title', 'content', 'url', 'error'
@@ -110,28 +114,63 @@ def extract_mediawiki_content(wiki_url: str, page_title: str, api_key: Optional[
             "inprop": "url"
         }
         
-        if api_key:
-            params["apikey"] = api_key
+        # Handle authentication
+        headers = {
+            "User-Agent": "JME-AI-Pipeline/1.0"
+        }
+        cookies = {}
         
-        headers = {}
         if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+            # Check if it's a Bearer token
+            if api_key.startswith("Bearer "):
+                headers["Authorization"] = api_key
+            # Check if it's a cookie string
+            elif "=" in api_key and ("session" in api_key.lower() or "cookie" in api_key.lower()):
+                # Parse cookie string: "session=abc123; token=xyz"
+                for cookie_pair in api_key.split(";"):
+                    if "=" in cookie_pair:
+                        key, value = cookie_pair.strip().split("=", 1)
+                        cookies[key.strip()] = value.strip()
+            # Otherwise treat as API key parameter
+            else:
+                params["apikey"] = api_key
+                # Also try as Bearer token (common for internal wikis)
+                headers["Authorization"] = f"Bearer {api_key}"
         
-        resp = requests.get(api_url, params=params, headers=headers, timeout=15)
+        resp = requests.get(api_url, params=params, headers=headers, cookies=cookies, timeout=15)
+        
+        # Check for authentication errors
+        if resp.status_code == 401 or resp.status_code == 403:
+            return {
+                "ok": False, 
+                "error": f"Authentication failed (HTTP {resp.status_code}). Check your API key/token. Internal wikis may require authentication."
+            }
+        
         resp.raise_for_status()
         data = resp.json()
         
+        # Check for API errors
+        if "error" in data:
+            error_info = data["error"]
+            return {
+                "ok": False,
+                "error": f"MediaWiki API error: {error_info.get('info', 'Unknown error')} (code: {error_info.get('code', 'unknown')})"
+            }
+        
         pages = data.get("query", {}).get("pages", {})
         if not pages:
-            return {"ok": False, "error": f"Page '{page_title}' not found"}
+            return {"ok": False, "error": f"Page '{page_title}' not found or access denied"}
         
         page_id = list(pages.keys())[0]
         page_data = pages[page_id]
         
         if page_id == "-1":
-            return {"ok": False, "error": f"Page '{page_title}' not found"}
+            return {"ok": False, "error": f"Page '{page_title}' not found. Check the page title and ensure you have access."}
         
         content = page_data.get("extract", "")
+        if not content:
+            return {"ok": False, "error": f"Page '{page_title}' has no extractable content or access is restricted"}
+        
         title = page_data.get("title", page_title)
         canonical_url = page_data.get("canonicalurl", f"{wiki_base}/wiki/{page_title.replace(' ', '_')}")
         
@@ -142,6 +181,10 @@ def extract_mediawiki_content(wiki_url: str, page_title: str, api_key: Optional[
             "url": canonical_url,
             "extract": content[:500]  # First 500 chars as summary
         }
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": f"Timeout connecting to wiki at {wiki_url}. Check network connectivity and wiki URL."}
+    except requests.exceptions.ConnectionError as e:
+        return {"ok": False, "error": f"Cannot connect to wiki at {wiki_url}. Check if the URL is correct and accessible: {e}"}
     except requests.exceptions.RequestException as e:
         return {"ok": False, "error": f"Failed to fetch MediaWiki page: {e}"}
     except Exception as e:
@@ -150,11 +193,15 @@ def extract_mediawiki_content(wiki_url: str, page_title: str, api_key: Optional[
 def extract_wiki_from_url(url: str, api_key: Optional[str] = None) -> Dict[str, Any]:
     """
     Extract content from a wiki page given a URL.
-    Auto-detects wiki type (Wikipedia, MediaWiki, etc.)
+    Auto-detects wiki type (Wikipedia, MediaWiki, internal wikis, etc.)
     
     Args:
-        url: Full URL to the wiki page
-        api_key: Optional API key if required
+        url: Full URL to the wiki page (e.g., "https://internal-wiki.company.com/wiki/Page_Title")
+        api_key: Optional API key/token for authentication. For internal wikis, this can be:
+            - Bearer token: "Bearer <token>"
+            - API key: "<key>"
+            - Cookie string: "session=<session_id>; token=<token>"
+            - Session cookie: "session=<session_id>"
     
     Returns:
         Dict with 'ok', 'title', 'content', 'url', 'error'
@@ -166,8 +213,8 @@ def extract_wiki_from_url(url: str, api_key: Optional[str] = None) -> Dict[str, 
         # Parse URL
         url_lower = url.lower()
         
-        # Wikipedia detection
-        if "wikipedia.org" in url_lower or "wikipedia.org/wiki/" in url_lower:
+        # Wikipedia detection (public only)
+        if "wikipedia.org" in url_lower:
             # Extract page title from URL
             # Format: https://en.wikipedia.org/wiki/Page_Title
             match = re.search(r'/wiki/([^?#]+)', url)
@@ -177,22 +224,68 @@ def extract_wiki_from_url(url: str, api_key: Optional[str] = None) -> Dict[str, 
             else:
                 return {"ok": False, "error": "Could not extract page title from Wikipedia URL"}
         
-        # MediaWiki detection (generic)
-        elif "/wiki/" in url_lower or "/index.php" in url_lower:
+        # MediaWiki detection (includes internal wikis)
+        # Check for common MediaWiki patterns: /wiki/, /index.php, /w/, or api.php
+        elif "/wiki/" in url_lower or "/index.php" in url_lower or "/w/" in url_lower or "/api.php" in url_lower:
             # Extract base URL and page title
             # Format: https://wiki.example.com/wiki/Page_Title
+            # Format: https://internal-wiki.company.com/w/index.php?title=Page_Title
+            # Format: https://wiki.example.com/w/Page_Title
+            
+            # Try /wiki/ pattern first
             match = re.search(r'(https?://[^/]+)/.*?/([^?#]+)', url)
             if match:
                 wiki_base = match.group(1)
                 page_title = match.group(2).replace("_", " ")
+                # Clean up page title (remove query params if any)
+                if "?" in page_title:
+                    page_title = page_title.split("?")[0]
                 return extract_mediawiki_content(wiki_base, page_title, api_key)
-            else:
-                return {"ok": False, "error": "Could not parse MediaWiki URL"}
+            
+            # Try index.php?title= pattern
+            match = re.search(r'(https?://[^/]+).*?[?&]title=([^&#]+)', url)
+            if match:
+                wiki_base = match.group(1)
+                page_title = match.group(2).replace("_", " ").replace("+", " ")
+                page_title = unquote(page_title)
+                return extract_mediawiki_content(wiki_base, page_title, api_key)
+            
+            # Try /w/ pattern (some MediaWiki installations)
+            match = re.search(r'(https?://[^/]+)/w/([^?#]+)', url)
+            if match:
+                wiki_base = match.group(1)
+                page_title = match.group(2).replace("_", " ")
+                return extract_mediawiki_content(wiki_base, page_title, api_key)
+            
+            return {"ok": False, "error": "Could not parse MediaWiki URL. Supported formats: /wiki/Page_Title, /w/Page_Title, or /index.php?title=Page_Title"}
         
-        # Generic wiki page - try to extract as HTML
+        # Generic wiki page - try to extract as HTML (for non-MediaWiki wikis)
         else:
             try:
-                resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                headers = {"User-Agent": "JME-AI-Pipeline/1.0"}
+                cookies = {}
+                
+                # Handle authentication for generic wikis
+                if api_key:
+                    if api_key.startswith("Bearer "):
+                        headers["Authorization"] = api_key
+                    elif "=" in api_key:
+                        # Parse cookie string
+                        for cookie_pair in api_key.split(";"):
+                            if "=" in cookie_pair:
+                                key, value = cookie_pair.strip().split("=", 1)
+                                cookies[key.strip()] = value.strip()
+                    else:
+                        headers["Authorization"] = f"Bearer {api_key}"
+                
+                resp = requests.get(url, timeout=15, headers=headers, cookies=cookies)
+                
+                if resp.status_code == 401 or resp.status_code == 403:
+                    return {
+                        "ok": False,
+                        "error": f"Authentication failed (HTTP {resp.status_code}). Internal wikis may require authentication. Check your API key/token."
+                    }
+                
                 resp.raise_for_status()
                 
                 # Extract title
@@ -203,6 +296,12 @@ def extract_wiki_from_url(url: str, api_key: Optional[str] = None) -> Dict[str, 
                 text_content = re.sub(r'<[^>]+>', ' ', resp.text)
                 text_content = re.sub(r'\s+', ' ', text_content).strip()
                 
+                if not text_content or len(text_content) < 50:
+                    return {
+                        "ok": False,
+                        "error": "Could not extract meaningful content from page. The page may require authentication or use a different format."
+                    }
+                
                 return {
                     "ok": True,
                     "title": title,
@@ -210,6 +309,12 @@ def extract_wiki_from_url(url: str, api_key: Optional[str] = None) -> Dict[str, 
                     "url": url,
                     "extract": text_content[:500]
                 }
+            except requests.exceptions.Timeout:
+                return {"ok": False, "error": f"Timeout connecting to wiki at {url}. Check network connectivity."}
+            except requests.exceptions.ConnectionError as e:
+                return {"ok": False, "error": f"Cannot connect to wiki at {url}. Check if the URL is correct and accessible: {e}"}
+            except requests.exceptions.HTTPError as e:
+                return {"ok": False, "error": f"HTTP error accessing wiki: {e}. Check authentication if this is an internal wiki."}
             except Exception as e:
                 return {"ok": False, "error": f"Failed to extract content from URL: {e}"}
     
