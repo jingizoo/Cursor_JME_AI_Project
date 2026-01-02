@@ -91,11 +91,37 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         candidate = text[start:end+1].strip()
-        # Clean up common issues
-        candidate = re.sub(r',\s*}', '}', candidate)
+        
+        # First, try to clean up common JSON issues
+        candidate = re.sub(r',\s*}', '}', candidate)  # Remove trailing commas
         candidate = re.sub(r',\s*]', ']', candidate)
-        # Remove any text that looks like it's after the JSON (common LLM issue)
-        # Stop at lines that don't look like JSON
+        
+        # Try parsing as-is first
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+        
+        # If that fails, try to remove text after JSON
+        # Find the last complete JSON structure by counting braces
+        brace_count = 0
+        last_valid_end = -1
+        for i, char in enumerate(candidate):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    last_valid_end = i + 1
+        
+        if last_valid_end > 0:
+            candidate = candidate[:last_valid_end]
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+        
+        # Last resort: remove lines that don't look like JSON
         lines = candidate.split('\n')
         fixed_lines = []
         for line in lines:
@@ -111,11 +137,7 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
         try:
             return json.loads(fixed_candidate)
         except Exception:
-            # Try the original candidate
-            try:
-                return json.loads(candidate)
-            except Exception:
-                pass
+            pass
     
     # Strategy 4: Try to find JSON after common prefixes
     # Some LLMs say "Here's the JSON:" or similar
