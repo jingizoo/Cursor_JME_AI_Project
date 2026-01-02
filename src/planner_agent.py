@@ -103,11 +103,35 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     
     user = json.dumps(user_data, ensure_ascii=False, separators=(',', ':'))  # Compact JSON (no spaces)
     
-    # Use num_predict=512 to limit generation and speed up (SQL is usually short)
-    text = ollama_chat(base_url=base_url, model=model, messages=[
-        {"role":"system","content":system},
-        {"role":"user","content":user}
-    ], num_predict=512)  # Limit to 512 tokens for faster response
+    # Use num_predict to limit generation and speed up (SQL is usually short)
+    # Increased to 1024 to ensure model has enough tokens (512 was too restrictive)
+    try:
+        text = ollama_chat(base_url=base_url, model=model, messages=[
+            {"role":"system","content":system},
+            {"role":"user","content":user}
+        ], num_predict=1024)  # Increased from 512 to ensure complete responses
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Failed to get response from LLM: {e}",
+            "hint": "Check Ollama connection, model availability, or try a smaller model.",
+            "raw": ""
+        }
+    
+    # Handle empty response
+    if not text or not text.strip():
+        return {
+            "ok": False,
+            "error": "LLM returned empty response. Possible causes: 1) num_predict limit too low, 2) Model failed to generate, 3) Response was cut off, 4) Prompt too large.",
+            "hint": "Try: 1) Using a smaller model (qwen3:4b), 2) Reducing schema size, 3) Checking Ollama logs, 4) Increasing num_predict limit",
+            "raw": text if text else "(empty string)",
+            "diagnostics": {
+                "response_length": len(text) if text else 0,
+                "model": model,
+                "num_predict": 1024
+            }
+        }
+    
     obj = extract_json(text)
     
     # Better error handling for JSON extraction failures

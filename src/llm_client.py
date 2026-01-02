@@ -25,9 +25,42 @@ def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], te
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout_sec) as r:
-        out = json.loads(r.read().decode("utf-8"))
-    return out["message"]["content"]
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as r:
+            response_data = r.read().decode("utf-8")
+            out = json.loads(response_data)
+            # Handle empty or missing content
+            message_content = out.get("message", {}).get("content", "")
+            if not message_content:
+                # Check if there's an error in the response
+                if "error" in out:
+                    raise Exception(f"Ollama API error: {out['error']}")
+                
+                # Check if response was cut off (done: false means incomplete)
+                done_reason = out.get("done_reason", "")
+                if out.get("done") is False:
+                    raise Exception(f"Ollama response incomplete (done_reason: {done_reason or 'unknown'})")
+                
+                # Check done_reason for clues
+                if done_reason:
+                    if done_reason == "stop":
+                        # Model stopped naturally but content is empty - unusual
+                        raise Exception(f"Ollama stopped but returned empty content (done_reason: {done_reason})")
+                    elif done_reason == "length":
+                        raise Exception(f"Ollama hit token limit (num_predict={num_predict}) before generating content. Try increasing num_predict.")
+                    else:
+                        raise Exception(f"Ollama returned empty content (done_reason: {done_reason})")
+                
+                raise Exception("Ollama returned empty response content (no done_reason provided)")
+            
+            return message_content
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8") if e.fp else ""
+        raise Exception(f"HTTP error {e.code}: {error_body}")
+    except urllib.error.URLError as e:
+        raise Exception(f"Connection error: {e.reason}")
+    except json.JSONDecodeError as e:
+        raise Exception(f"Invalid JSON response from Ollama: {e}")
 
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
     """
