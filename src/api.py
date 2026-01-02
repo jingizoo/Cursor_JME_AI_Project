@@ -39,10 +39,11 @@ def _maybe_invalidate_schema_cache() -> None:
         _TABLE_INFO_CACHE = {}
         _PLAN_CACHE = {}  # Invalidate plan cache when DB changes
 
-def _get_table_info_cached(con, table: str, max_cols: int = 20) -> list[dict[str, str]]:
+def _get_table_info_cached(con, table: str, max_cols: int = None) -> list[dict[str, str]]:
     """
-    Get table info with column limit to reduce prompt size.
-    For very large tables, only include first max_cols columns.
+    Get table info with optional column limit to reduce prompt size.
+    If max_cols is None, includes all columns.
+    For very large tables, set max_cols to limit to first N columns.
     """
     _maybe_invalidate_schema_cache()
     cache_key = (table, max_cols)
@@ -51,60 +52,94 @@ def _get_table_info_cached(con, table: str, max_cols: int = 20) -> list[dict[str
         return cached
     cols = con.execute(f"PRAGMA table_info('{table}')").fetchall()
     # Limit columns to reduce prompt size (most important columns are usually first)
-    cols = cols[:max_cols]
+    if max_cols:
+        cols = cols[:max_cols]
     out = [{"name": c[1], "type": c[2]} for c in cols]
     _TABLE_INFO_CACHE[cache_key] = out
     return out
 
-def _schema_for_llm(con, question: str, max_tables: int = 5, max_cols_per_table: int = 15) -> dict:
+def _schema_for_llm(con, question: str, max_tables: int = None, max_cols_per_table: int = None) -> dict:
     """
-    Build a compact schema payload for the LLM to reduce prompt size / latency.
-    Aggressively limits tables and columns to speed up LLM generation.
+    Build schema payload for the LLM. Includes ALL tables dynamically by default.
+    Can be limited via environment variables for performance.
     
     Args:
         con: DuckDB connection
         question: User question (used for relevance matching)
-        max_tables: Maximum number of tables to include (default: 5, was 8)
-        max_cols_per_table: Maximum columns per table (default: 15, was unlimited)
+        max_tables: Maximum number of tables to include (None = all tables, configurable via JME_MAX_TABLES env var)
+        max_cols_per_table: Maximum columns per table (None = all columns, configurable via JME_MAX_COLS env var)
     """
-    # Always include canonical tables (but limit to most important)
-    base_tables = ["invoices", "payments", "expenses", "bank_txns"]  # Removed registry tables
+    import os
+    
+    # Get limits from environment variables or use defaults
+    if max_tables is None:
+        max_tables = int(os.getenv("JME_MAX_TABLES", "0"))  # 0 means unlimited/all tables
+        if max_tables == 0:
+            max_tables = None  # None means include all
+    
+    if max_cols_per_table is None:
+        max_cols_per_table = int(os.getenv("JME_MAX_COLS", "50"))  # Default 50 columns per table
+    
+    # Get all existing tables
     existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
     existing_set = set(existing_tables)
-
-    # Pull recent raw tables (if registry exists) - but limit more aggressively
-    recent_raw: list[str] = []
-    if "raw_sheet_registry" in existing_set:
-        try:
-            rows = con.execute(
-                "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC LIMIT 10"  # Reduced from 25
-            ).fetchall()
-            recent_raw = [r[0] for r in rows if r and r[0]]
-        except Exception:
-            recent_raw = []
-
-    # Prefer raw tables that match question tokens
-    tokens = [t for t in "".join([c.lower() if c.isalnum() else " " for c in (question or "")]).split() if len(t) >= 3]
-    matched = []
-    if tokens and recent_raw:
-        for tname in recent_raw:
-            tlow = tname.lower()
-            if any(tok in tlow for tok in tokens):
-                matched.append(tname)
-
-    # Limit to fewer raw tables
-    selected_raw = (matched + recent_raw)[:max(1, max_tables - len(base_tables))]  # Only enough to fill remaining slots
-
-    selected = []
-    for t in base_tables + selected_raw:
-        if t in existing_set and t not in selected:
-            selected.append(t)
-        if len(selected) >= max_tables:
-            break
-
+    
+    # Filter out registry/metadata tables (keep them separate, don't send to LLM)
+    registry_tables = {"schema_registry", "raw_sheet_registry"}
+    data_tables = [t for t in existing_tables if t not in registry_tables]
+    
+    question_lower = (question or "").lower()
+    
+    # Check if question explicitly mentions any table names
+    explicitly_mentioned = []
+    for tname in data_tables:
+        if tname.lower() in question_lower:
+            explicitly_mentioned.append(tname)
+    
+    # If max_tables is set, prioritize: explicitly mentioned > raw tables > canonical tables
+    if max_tables and len(data_tables) > max_tables:
+        # Always include explicitly mentioned tables
+        selected = list(explicitly_mentioned)
+        
+        # Then add raw tables (most recent first)
+        raw_tables = [t for t in data_tables if t.startswith("raw_") and t not in selected]
+        if "raw_sheet_registry" in existing_set:
+            try:
+                rows = con.execute(
+                    "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC"
+                ).fetchall()
+                ordered_raw = [r[0] for r in rows if r and r[0] and r[0] in raw_tables]
+                # Add ordered raw tables
+                for t in ordered_raw:
+                    if t not in selected and len(selected) < max_tables:
+                        selected.append(t)
+            except Exception:
+                pass
+        
+        # Then add canonical tables
+        canonical_tables = ["invoices", "payments", "expenses", "bank_txns"]
+        for t in canonical_tables:
+            if t in existing_set and t not in selected and len(selected) < max_tables:
+                selected.append(t)
+        
+        # Finally, add any remaining tables
+        for t in data_tables:
+            if t not in selected and len(selected) < max_tables:
+                selected.append(t)
+    else:
+        # Include ALL tables (no limit)
+        selected = data_tables
+    
+    # Build schema with all selected tables
     tables: dict[str, list[dict[str, str]]] = {}
     for t in selected:
-        tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
+        # For explicitly mentioned tables, include more columns if limit is set
+        if t.lower() in question_lower and max_cols_per_table:
+            # Include more columns for tables mentioned in question
+            tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table * 2)
+        else:
+            # Use configured limit or None (all columns)
+            tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
 
     return {"tables": tables}
 

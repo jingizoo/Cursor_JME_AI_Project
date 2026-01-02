@@ -81,9 +81,11 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
         "3. NO text before the opening brace\n",
         "4. NO text after the closing brace\n",
         "5. NO explanations, NO comments, NO markdown\n",
-        "6. Output ONLY: {\"sql\":\"SELECT ...\",\"notes\":\"...\"}\n",
-        "Example correct response: {\"sql\":\"SELECT * FROM invoices LIMIT 200\",\"notes\":\"\"}\n",
-        "Rules: SELECT/CTE only. Add LIMIT 200.\n"
+        "6. ALWAYS generate SQL - even if unsure, make your best attempt\n",
+        "7. If column name is unclear, use common patterns (e.g., 'user', 'users', 'user_name', 'user_id')\n",
+        "8. Output ONLY: {\"sql\":\"SELECT ...\",\"notes\":\"...\"}\n",
+        "Example: {\"sql\":\"SELECT COUNT(*) as count FROM table_name LIMIT 200\",\"notes\":\"\"}\n",
+        "Rules: SELECT/CTE only. Add LIMIT 200. Always provide SQL, never leave sql field empty.\n"
     ]
     
     if pdf_context:
@@ -217,13 +219,34 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
             }
     else:
         sql = obj.get("sql", "")
-        if not sql:
-            return {
-                "ok": False,
-                "error": "LLM returned JSON but no SQL field found",
-                "raw": text[:1000],
-                "parsed_json": obj
-            }
+        if not sql or not sql.strip():
+            # If SQL is empty, try to generate a basic query based on the question
+            # Extract table name from question if possible
+            question_lower = question.lower()
+            table_name = None
+            for t in schema.get("tables", {}).keys():
+                if t.lower() in question_lower:
+                    table_name = t
+                    break
+            
+            if table_name:
+                # Generate a basic COUNT query as fallback
+                sql = f"SELECT COUNT(*) as count FROM {table_name} LIMIT 200"
+                return {
+                    "ok": True,
+                    "sql": sql,
+                    "notes": f"Generated fallback query - LLM returned empty SQL. Original notes: {obj.get('notes', '')}",
+                    "raw": text[:1000],
+                    "fallback": True
+                }
+            else:
+                return {
+                    "ok": False,
+                    "error": "LLM returned JSON but SQL field is empty. Could not determine table from question.",
+                    "raw": text[:1000],
+                    "parsed_json": obj,
+                    "hint": "Try rephrasing your question to include the table name, or check if the table exists in the schema."
+                }
     
     if not validate_sql(sql):
         return {
