@@ -34,8 +34,29 @@ app = FastAPI(title="JME AI Finance Pipeline - Chart API")
 
 def df_to_records_safe(df: pd.DataFrame):
     """Convert DataFrame to records, replacing NaN/Inf with None for JSON serialization."""
+    # Make a copy to avoid modifying original
+    df = df.copy()
+    # Replace +/-inf with NaN first
     df = df.replace([np.inf, -np.inf], np.nan)
-    return df.where(pd.notnull(df), None).to_dict(orient="records")
+    # Replace all NaN values with None (more robust than where/notnull)
+    df = df.fillna(None)
+    # Convert to dict - any remaining NaN will be caught by explicit None replacement
+    records = df.to_dict(orient="records")
+    # Final pass: recursively replace any remaining NaN/Inf in nested structures
+    def clean_value(v):
+        # Check for NaN/Inf in float or numpy numeric types
+        try:
+            if isinstance(v, (float, np.floating, np.number)):
+                if np.isnan(v) or np.isinf(v):
+                    return None
+        except (TypeError, ValueError):
+            pass  # Not a numeric type, continue
+        if isinstance(v, dict):
+            return {k: clean_value(val) for k, val in v.items()}
+        elif isinstance(v, (list, tuple)):
+            return [clean_value(item) for item in v]
+        return v
+    return [clean_value(r) for r in records]
 
 _DB_MTIME_CACHE: float | None = None
 _TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}

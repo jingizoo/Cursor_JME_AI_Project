@@ -106,20 +106,41 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     user = json.dumps(user_data, ensure_ascii=False, separators=(',', ':'))  # Compact JSON (no spaces)
     
     # Use num_predict to limit generation and speed up (SQL is usually short)
-    # Make it configurable via environment variable, default to 2048 for safety
-    num_predict_limit = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))  # Default 2048, was 1024
+    # For smaller models (3b), use lower limits. For larger models (8b+), use higher limits.
+    # Make it configurable via environment variable
+    default_num_predict = 1024 if "3b" in model.lower() or "1b" in model.lower() else 2048
+    num_predict_limit = int(os.getenv("OLLAMA_NUM_PREDICT", str(default_num_predict)))
+    
+    # Timeout: smaller models might be slower, but also might hang. Use configurable timeout.
+    timeout_sec = int(os.getenv("OLLAMA_TIMEOUT", "300"))  # Default 5 minutes
     
     try:
-        text = ollama_chat(base_url=base_url, model=model, messages=[
-            {"role":"system","content":system},
-            {"role":"user","content":user}
-        ], num_predict=num_predict_limit)
+        print(f"[plan_sql] Using model: {model}, num_predict: {num_predict_limit}, timeout: {timeout_sec}s")
+        text = ollama_chat(
+            base_url=base_url, 
+            model=model, 
+            messages=[
+                {"role":"system","content":system},
+                {"role":"user","content":user}
+            ], 
+            num_predict=num_predict_limit,
+            timeout_sec=timeout_sec
+        )
     except Exception as e:
+        error_msg = str(e)
+        hint = f"LLM call failed with model '{model}'. "
+        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            hint += f"Request timed out after {timeout_sec}s. Try: export OLLAMA_TIMEOUT=600 for longer timeout, or use a faster model."
+        elif "connection" in error_msg.lower():
+            hint += f"Connection error. Check if Ollama is running at {base_url} and model '{model}' is available (run: ollama list)."
+        else:
+            hint += f"Error: {error_msg}. Check Ollama logs or try a different model."
         return {
             "ok": False,
-            "error": f"Failed to get response from LLM: {e}",
-            "hint": "Check Ollama connection, model availability, or try a smaller model.",
-            "raw": ""
+            "error": f"Failed to get response from LLM: {error_msg}",
+            "hint": hint,
+            "raw": "",
+            "model": model  # Include model name in error response
         }
     
     # Handle empty response

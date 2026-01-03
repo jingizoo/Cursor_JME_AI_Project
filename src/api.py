@@ -20,9 +20,29 @@ from .report_service import generate_report_pack
 
 def df_to_records_safe(df: pd.DataFrame):
     """Convert DataFrame to records, replacing NaN/Inf with None for JSON serialization."""
-    # Replace +/-inf with NaN, then convert NaN to None
+    # Make a copy to avoid modifying original
+    df = df.copy()
+    # Replace +/-inf with NaN first
     df = df.replace([np.inf, -np.inf], np.nan)
-    return df.where(pd.notnull(df), None).to_dict(orient="records")
+    # Replace all NaN values with None (more robust than where/notnull)
+    df = df.fillna(None)
+    # Convert to dict - any remaining NaN will be caught by explicit None replacement
+    records = df.to_dict(orient="records")
+    # Final pass: recursively replace any remaining NaN/Inf in nested structures
+    def clean_value(v):
+        # Check for NaN/Inf in float or numpy numeric types
+        try:
+            if isinstance(v, (float, np.floating, np.number)):
+                if np.isnan(v) or np.isinf(v):
+                    return None
+        except (TypeError, ValueError):
+            pass  # Not a numeric type, continue
+        if isinstance(v, dict):
+            return {k: clean_value(val) for k, val in v.items()}
+        elif isinstance(v, (list, tuple)):
+            return [clean_value(item) for item in v]
+        return v
+    return [clean_value(r) for r in records]
 
 _DB_MTIME_CACHE: float | None = None
 _TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}
@@ -188,6 +208,7 @@ DB_PATH = CACHE_DIR / "pipeline.duckdb"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "300"))  # Default 5 minutes (300 seconds)
 
 app = FastAPI(title="JME AI Finance Pipeline (Dynamic Excel)")
 
@@ -286,6 +307,7 @@ def ask(req: AskReq):
             plan["hint"] = _build_no_answer_hint(con=con, question=req.question, error=str(plan.get("error", "")))
             plan["timings_ms"] = timings
             plan["total_ms"] = round((time.time() - start_time) * 1000, 2)
+            plan["model"] = OLLAMA_MODEL  # Show which model was used
             return plan
 
         sql = plan["sql"]
@@ -306,6 +328,7 @@ def ask(req: AskReq):
                 "plan_raw": plan.get("raw", ""),
                 "timings_ms": timings,
                 "total_ms": round((time.time() - start_time) * 1000, 2),
+                "model": OLLAMA_MODEL,  # Show which model was used
             }
 
         # Convert to records (with timing)
@@ -317,10 +340,17 @@ def ask(req: AskReq):
                 "rows": [],
                 "notes": plan.get("notes", ""),
                 "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, empty=True),
+                "model": OLLAMA_MODEL,
             }
         else:
             rows = df_to_records_safe(df)
-            result = {"ok": True, "sql": sql, "rows": rows, "notes": plan.get("notes","")}
+            result = {
+                "ok": True, 
+                "sql": sql, 
+                "rows": rows, 
+                "notes": plan.get("notes",""),
+                "model": OLLAMA_MODEL,
+            }
         
         timings["json_serialize_ms"] = round((time.time() - t3) * 1000, 2)
         timings["total_ms"] = round((time.time() - start_time) * 1000, 2)

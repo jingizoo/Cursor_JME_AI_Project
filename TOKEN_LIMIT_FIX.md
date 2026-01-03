@@ -114,3 +114,4 @@ OLLAMA_NUM_PREDICT=2048
 - `src/schema_agent.py` - Uses configurable num_predict
 - `src/llm_client.py` - Better error messages for token limits
 
+

@@ -3,14 +3,19 @@ import re
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.0, timeout_sec: int = 600, num_predict: int = 512) -> str:
+def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.0, timeout_sec: int = 300, num_predict: int = 512) -> str:
     """
     Calls Ollama /api/chat.
     base_url example: http://localhost:11434 or http://<linux-ip>:11434
     
     Args:
+        base_url: Ollama server URL
+        model: Model name (e.g., "qwen2.5:3b", "qwen3:8b")
+        messages: List of message dicts with "role" and "content"
+        temperature: Sampling temperature (default: 0.0 for deterministic)
+        timeout_sec: Request timeout in seconds (default: 300 = 5 minutes)
         num_predict: Maximum tokens to generate (default: 512). Lower = faster but may truncate.
-                    For SQL generation, 512 is usually enough.
+                    For SQL generation, 512-1024 is usually enough for small models.
     """
     url = base_url.rstrip("/") + "/api/chat"
     # Limit token generation to speed up response (SQL queries are usually short)
