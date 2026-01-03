@@ -299,7 +299,7 @@ def quick_excel_query(
     # Replace +/-inf with NaN, then convert NaN to None for JSON serialization
     df = df.copy()
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.fillna(None)
+    df = df.fillna(value=None)
     records = df.to_dict(orient="records")
     # Final pass: recursively replace any remaining NaN/Inf
     def clean_value(v):

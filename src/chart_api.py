@@ -39,7 +39,7 @@ def df_to_records_safe(df: pd.DataFrame):
     # Replace +/-inf with NaN first
     df = df.replace([np.inf, -np.inf], np.nan)
     # Replace all NaN values with None (more robust than where/notnull)
-    df = df.fillna(None)
+    df = df.fillna(value=None)
     # Convert to dict - any remaining NaN will be caught by explicit None replacement
     records = df.to_dict(orient="records")
     # Final pass: recursively replace any remaining NaN/Inf in nested structures
