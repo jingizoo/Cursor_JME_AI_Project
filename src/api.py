@@ -327,6 +327,15 @@ def ask(req: AskReq):
                 hint += " TIP: The query tried to convert empty strings or invalid values to numbers. The LLM should use NULLIF(TRIM(REPLACE(col, ',', '')), '') or CASE statements to handle empty/null values before casting to DECIMAL/INTEGER."
             elif "syntax error" in err.lower() or "parser error" in err.lower():
                 hint += " TIP: SQL syntax error detected. Common issues: 1) Using backticks instead of double quotes for identifiers (DuckDB uses double quotes), 2) Unclosed parentheses/quotes, 3) Missing commas in SELECT lists. The system will auto-fix backticks, but check for other syntax issues."
+            elif "binder error" in err.lower() or "referenced column" in err.lower() or "not found" in err.lower():
+                # Extract candidate columns from error message if available
+                import re
+                candidate_match = re.search(r'Candidate bindings:\s*"([^"]+)"(?:\s*,\s*"([^"]+)")*', err, re.IGNORECASE)
+                if candidate_match:
+                    candidates = [c for c in candidate_match.groups() if c]
+                    hint += f" TIP: Column not found. Available columns: {', '.join(candidates)}. The LLM must use ONLY columns that exist in the schema. Check the schema provided to the LLM and use exact column names."
+                else:
+                    hint += " TIP: Column not found error. The LLM must use ONLY columns that exist in the provided schema. Check /api/v1/schema or /api/v1/table/<table>/columns to see available columns, then re-ask with exact column names."
             
             return {
                 "ok": False,
