@@ -365,10 +365,16 @@ def ask_with_chart(req: ChartQuestionReq):
             df = con.execute(sql).df()
         except Exception as e:
             err = f"{e}"
+            # Provide helpful hint for common errors
+            hint = _build_no_answer_hint(con=con, question=req.question, sql=sql, error=err)
+            if "conversion" in err.lower() or "could not convert" in err.lower() or "cast" in err.lower():
+                hint += " TIP: The query tried to convert empty strings or invalid values to numbers. The LLM should use NULLIF(TRIM(REPLACE(col, ',', '')), '') or CASE statements to handle empty/null values before casting to DECIMAL/INTEGER."
+            elif "syntax error" in err.lower() or "parser error" in err.lower():
+                hint += " TIP: SQL syntax error detected. Common issues: 1) Using backticks instead of double quotes for identifiers (DuckDB uses double quotes), 2) Unclosed parentheses/quotes, 3) Missing commas in SELECT lists. The system will auto-fix backticks, but check for other syntax issues."
             return {
                 "ok": False,
                 "error": f"SQL execution failed: {err}",
-                "hint": _build_no_answer_hint(con=con, question=req.question, sql=sql, error=err),
+                "hint": hint,
                 "sql": sql,
                 "plan_raw": plan.get("raw", ""),
             }

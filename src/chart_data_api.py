@@ -197,11 +197,12 @@ def ask_data(req: AskDataReq):
         try:
             df = con.execute(sql).df()
         except Exception as e:
+            err = f"{e}"
             # Optional one-shot retry with error context to improve SQL accuracy
             if req.retry_on_error:
                 q2 = (
                     f"{req.question}\n\n"
-                    f"Previous SQL failed with error: {e}\n"
+                    f"Previous SQL failed with error: {err}\n"
                     f"Generate corrected SQL using ONLY the provided schema. SELECT/CTE only."
                 )
                 plan2 = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=q2)
@@ -213,11 +214,22 @@ def ask_data(req: AskDataReq):
                         plan = plan2
                         _PLAN_CACHE[cache_key] = {"sql": sql2, "notes": plan2.get("notes", "")}
                     except Exception as e2:
-                        return {"ok": False, "error": f"SQL execution failed: {e2}", "sql": sql2, "plan_raw": plan2.get("raw", "")}
+                        err2 = f"{e2}"
+                        hint = ""
+                        if "conversion" in err2.lower() or "could not convert" in err2.lower() or "cast" in err2.lower():
+                            hint = " TIP: Conversion error - use NULLIF to handle empty strings before casting."
+                        elif "syntax error" in err2.lower() or "parser error" in err2.lower():
+                            hint = " TIP: Syntax error - check for backticks (should be double quotes), unclosed parentheses, or missing commas."
+                        return {"ok": False, "error": f"SQL execution failed: {err2}", "sql": sql2, "plan_raw": plan2.get("raw", ""), "hint": hint}
                 else:
-                    return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw", ""), "retry_error": plan2.get("error")}
+                    return {"ok": False, "error": f"SQL execution failed: {err}", "sql": sql, "plan_raw": plan.get("raw", ""), "retry_error": plan2.get("error")}
             else:
-                return {"ok": False, "error": f"SQL execution failed: {e}", "sql": sql, "plan_raw": plan.get("raw", "")}
+                hint = ""
+                if "conversion" in err.lower() or "could not convert" in err.lower() or "cast" in err.lower():
+                    hint = " TIP: Conversion error - use NULLIF to handle empty strings before casting."
+                elif "syntax error" in err.lower() or "parser error" in err.lower():
+                    hint = " TIP: Syntax error - check for backticks (should be double quotes), unclosed parentheses, or missing commas."
+                return {"ok": False, "error": f"SQL execution failed: {err}", "sql": sql, "plan_raw": plan.get("raw", ""), "hint": hint}
 
         rows = df_to_records_safe(df)
         ctype = req.chart_type or detect_chart_type(req.question, df)

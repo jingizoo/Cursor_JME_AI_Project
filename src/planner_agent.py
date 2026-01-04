@@ -85,7 +85,19 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
         "7. If column name is unclear, use common patterns (e.g., 'user', 'users', 'user_name', 'user_id')\n",
         "8. Output ONLY: {\"sql\":\"SELECT ...\",\"notes\":\"...\"}\n",
         "Example: {\"sql\":\"SELECT COUNT(*) as count FROM table_name LIMIT 200\",\"notes\":\"\"}\n",
-        "Rules: SELECT/CTE only. Add LIMIT 200. Always provide SQL, never leave sql field empty.\n"
+        "Rules: SELECT/CTE only. Add LIMIT 200. Always provide SQL, never leave sql field empty.\n",
+        "\n",
+        "SQL SYNTAX RULES (DuckDB):\n",
+        "- Use DOUBLE QUOTES for table/column names (NOT backticks): \"table_name\", \"column_name\"\n",
+        "- Example: SELECT \"col_1\" FROM \"raw_table_name\" (correct)\n",
+        "- WRONG: SELECT `col_1` FROM `raw_table_name` (backticks are invalid in DuckDB)\n",
+        "- Always close all parentheses and quotes properly\n",
+        "\n",
+        "IMPORTANT: When casting strings to numbers (DECIMAL, INTEGER, etc.):\n",
+        "- Handle empty strings and NULL values: use NULLIF(TRIM(col), '') or filter them out\n",
+        "- Example: CAST(NULLIF(TRIM(REPLACE(\"col\", ',', '')), '') AS DECIMAL) instead of CAST(REPLACE(\"col\", ',', '') AS DECIMAL)\n",
+        "- Or use: CAST(CASE WHEN TRIM(\"col\") = '' OR \"col\" IS NULL THEN NULL ELSE REPLACE(\"col\", ',', '') END AS DECIMAL)\n",
+        "- Always validate numeric conversions to avoid conversion errors.\n"
     ]
     
     if pdf_context:
@@ -276,6 +288,10 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
             "raw": text[:1000],
             "sql_attempted": sql[:200]
         }
+    
+    # Fix common SQL syntax issues for DuckDB
+    # Replace backticks with double quotes (DuckDB uses double quotes, not backticks)
+    sql = sql.replace('`', '"')
     
     # Enforce LIMIT even if LLM forgets (performance optimization)
     sql = ensure_limit(sql, limit=200)
