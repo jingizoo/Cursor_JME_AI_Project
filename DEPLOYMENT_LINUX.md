@@ -28,7 +28,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama serve
 
 # In another terminal, pull the required model
-ollama pull qwen3:8b
+ollama pull qwen2.5:3b
 
 # Verify Ollama is running
 curl http://localhost:11434/api/tags
@@ -101,30 +101,64 @@ mkdir -p .cache
 
 Create a configuration script or set environment variables:
 
-**Option A: Using the provided start.sh script (recommended for development)**
+**Option A: Using the provided install.sh script (recommended)**
+```bash
+# Run the installation script which sets up everything
+chmod +x install.sh
+./install.sh
+# This will create .env.example with all recommended settings
+```
+
+**Option B: Using the provided start.sh script (for development)**
 ```bash
 # The start.sh script already sets defaults
 # Edit it if you need to change OLLAMA_URL or OLLAMA_MODEL
 chmod +x start.sh
 ```
 
-**Option B: Create a .env file (for production)**
+**Option C: Create a .env file (for production)**
 ```bash
 # Create .env file
 cat > .env << EOF
+# Ollama Configuration
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:3b
+OLLAMA_FORCE_JSON=1
+OLLAMA_KEEP_ALIVE=30m
+OLLAMA_MAX_CONCURRENCY=1
+OLLAMA_NUM_PREDICT=512
+OLLAMA_TIMEOUT=300
+
+# Data Directories
 JME_DATA_DIR=./data
 JME_CACHE_DIR=./.cache
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:8b
+
+# Schema Limits (for performance)
+JME_MAX_TABLES=12
+JME_MAX_COLS=25
+
+# PDF Context (set to 1 to disable PDF/wiki context search)
+JME_DISABLE_PDF_CONTEXT=0
+
+# CORS (for Superset integration)
+CORS_ORIGINS=*
 EOF
 ```
 
-**Option C: Export environment variables directly**
+**Option D: Export environment variables directly**
 ```bash
 export JME_DATA_DIR="./data"
 export JME_CACHE_DIR="./.cache"
 export OLLAMA_URL="http://localhost:11434"  # Change if Ollama is on different machine
-export OLLAMA_MODEL="qwen3:8b"
+export OLLAMA_MODEL="qwen2.5:3b"
+export OLLAMA_FORCE_JSON=1
+export OLLAMA_KEEP_ALIVE=30m
+export OLLAMA_MAX_CONCURRENCY=1
+export OLLAMA_NUM_PREDICT=512
+export OLLAMA_TIMEOUT=300
+export JME_MAX_TABLES=12
+export JME_MAX_COLS=25
+export JME_DISABLE_PDF_CONTEXT=0
 ```
 
 ### Step 7: Verify Ollama Connection
@@ -155,8 +189,11 @@ source .venv/bin/activate
 export JME_DATA_DIR="./data"
 export JME_CACHE_DIR="./.cache"
 export OLLAMA_URL="http://localhost:11434"
-export OLLAMA_MODEL="qwen3:8b"
-python -m uvicorn src.api:app --host 0.0.0.0 --port 8010
+export OLLAMA_MODEL="qwen2.5:3b"
+export OLLAMA_FORCE_JSON=1
+export OLLAMA_KEEP_ALIVE=30m
+export OLLAMA_MAX_CONCURRENCY=1
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8010 --workers 1
 ```
 
 The API will be available at:
@@ -190,8 +227,16 @@ Environment="PATH=/home/your-username/Cursor_JME_AI_Project/.venv/bin"
 Environment="JME_DATA_DIR=/home/your-username/Cursor_JME_AI_Project/data"
 Environment="JME_CACHE_DIR=/home/your-username/Cursor_JME_AI_Project/.cache"
 Environment="OLLAMA_URL=http://localhost:11434"
-Environment="OLLAMA_MODEL=qwen3:8b"
-ExecStart=/home/your-username/Cursor_JME_AI_Project/.venv/bin/python -m uvicorn src.api:app --host 0.0.0.0 --port 8010
+Environment="OLLAMA_MODEL=qwen2.5:3b"
+Environment="OLLAMA_FORCE_JSON=1"
+Environment="OLLAMA_KEEP_ALIVE=30m"
+Environment="OLLAMA_MAX_CONCURRENCY=1"
+Environment="OLLAMA_NUM_PREDICT=512"
+Environment="OLLAMA_TIMEOUT=300"
+Environment="JME_MAX_TABLES=12"
+Environment="JME_MAX_COLS=25"
+Environment="JME_DISABLE_PDF_CONTEXT=0"
+ExecStart=/home/your-username/Cursor_JME_AI_Project/.venv/bin/python -m uvicorn src.api:app --host 0.0.0.0 --port 8010 --workers 1
 Restart=always
 RestartSec=10
 
@@ -231,8 +276,11 @@ source .venv/bin/activate
 export JME_DATA_DIR="./data"
 export JME_CACHE_DIR="./.cache"
 export OLLAMA_URL="http://localhost:11434"
-export OLLAMA_MODEL="qwen3:8b"
-python -m uvicorn src.api:app --host 0.0.0.0 --port 8010
+export OLLAMA_MODEL="qwen2.5:3b"
+export OLLAMA_FORCE_JSON=1
+export OLLAMA_KEEP_ALIVE=30m
+export OLLAMA_MAX_CONCURRENCY=1
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8010 --workers 1
 
 # Detach: Press Ctrl+A, then D
 # Reattach: screen -r jme-pipeline
@@ -245,8 +293,11 @@ source .venv/bin/activate
 export JME_DATA_DIR="./data"
 export JME_CACHE_DIR="./.cache"
 export OLLAMA_URL="http://localhost:11434"
-export OLLAMA_MODEL="qwen3:8b"
-nohup python -m uvicorn src.api:app --host 0.0.0.0 --port 8010 > app.log 2>&1 &
+export OLLAMA_MODEL="qwen2.5:3b"
+export OLLAMA_FORCE_JSON=1
+export OLLAMA_KEEP_ALIVE=30m
+export OLLAMA_MAX_CONCURRENCY=1
+nohup python -m uvicorn src.api:app --host 0.0.0.0 --port 8010 --workers 1 > app.log 2>&1 &
 ```
 
 ## Firewall Configuration
@@ -330,6 +381,36 @@ source .venv/bin/activate
 # Reinstall dependencies
 pip install -r requirements.txt
 ```
+
+### Issue: Slow LLM responses (5+ minutes per query)
+**Solution:**
+- Use the default `qwen2.5:3b` model (faster on CPU)
+- Set `JME_DISABLE_PDF_CONTEXT=1` to skip PDF context search
+- Reduce schema size: `JME_MAX_TABLES=8`, `JME_MAX_COLS=20`
+- Use `--workers 1` with uvicorn (multiple workers compete with Ollama)
+- Check Ollama is using GPU if available: `ollama show qwen2.5:3b`
+
+## Performance Optimization
+
+The default configuration is optimized for CPU-only deployments:
+
+- **Default Model**: `qwen2.5:3b` (faster than 8B models on CPU)
+- **Schema Limits**: `JME_MAX_TABLES=12`, `JME_MAX_COLS=25` (reduces prompt size)
+- **Ollama Settings**: 
+  - `OLLAMA_FORCE_JSON=1` (structured output)
+  - `OLLAMA_KEEP_ALIVE=30m` (keeps model loaded)
+  - `OLLAMA_MAX_CONCURRENCY=1` (prevents CPU thrashing)
+  - `OLLAMA_NUM_PREDICT=512` (faster generation)
+
+**For faster queries on CPU:**
+- Use `--workers 1` with uvicorn (multiple workers compete with Ollama)
+- Set `JME_DISABLE_PDF_CONTEXT=1` if you don't need PDF/wiki context
+- Consider using an even smaller model if available: `OLLAMA_MODEL=qwen2.5:1.5b`
+
+**For GPU deployments:**
+- You can use larger models: `OLLAMA_MODEL=qwen3:8b`
+- Increase `OLLAMA_MAX_CONCURRENCY=2` or higher
+- Increase `JME_MAX_TABLES` and `JME_MAX_COLS` for more context
 
 ## Maintenance
 
