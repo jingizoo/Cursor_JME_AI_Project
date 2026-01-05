@@ -189,14 +189,21 @@ def normalize_and_insert(con, file: str, sheet: str, sheet_type: str, mapping: D
         }).dropna(subset=["amount"], how="all")
         append_rows(con, "bank_txns", out)
 
-def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None):
+def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None, exclude_files: Optional[List[str]] = None):
     con = connect(db_path)
     ingested = 0
     skipped = 0
     errors = []
+    
+    # Normalize exclude list (case-insensitive matching)
+    exclude_set = set(f.lower() for f in (exclude_files or []))
 
     # Process Excel files
     for xf in sorted(list(data_dir.glob("*.xlsx")) + list(data_dir.glob("*.xlsm"))):
+        # Skip excluded files
+        if xf.name.lower() in exclude_set:
+            skipped += 1
+            continue
         st = xf.stat()
         file_size, file_mtime = int(st.st_size), int(st.st_mtime)
 
@@ -257,6 +264,11 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
     # Process PDF files
     if PDF_AVAILABLE:
         for pdf_path in sorted(data_dir.glob("*.pdf")):
+            # Skip excluded files
+            if pdf_path.name.lower() in exclude_set:
+                skipped += 1
+                continue
+                
             st = pdf_path.stat()
             file_size, file_mtime = int(st.st_size), int(st.st_mtime)
 

@@ -19,6 +19,7 @@ from .planner_agent import plan_sql, get_schema, validate_sql
 from .quick_excel import quick_excel_query
 from .report_service import generate_report_pack
 from .utils_df import df_to_records_safe
+from .reset_db import reset_database
 
 _DB_SIG_CACHE: tuple[int, int] | None = None  # (mtime_ns, size)
 _TABLE_INFO_CACHE: dict[tuple[str, int | None], list[dict[str, str]]] = {}
@@ -261,6 +262,7 @@ class IngestReq(BaseModel):
     force: bool = False
     wiki_urls: Optional[List[str]] = None  # List of wiki page URLs to ingest
     wiki_api_key: Optional[str] = None  # Optional API key for private wikis
+    exclude_files: Optional[List[str]] = None  # List of file names to exclude from ingestion
 
 class AskReq(BaseModel):
     question: str
@@ -284,7 +286,8 @@ def ingest(req: IngestReq):
         model=OLLAMA_MODEL,
         force=req.force,
         wiki_urls=req.wiki_urls,
-        wiki_api_key=req.wiki_api_key
+        wiki_api_key=req.wiki_api_key,
+        exclude_files=req.exclude_files
     )
 
 @app.get("/catalog")
@@ -622,3 +625,19 @@ def get_table_columns(table_name: str):
         raise HTTPException(status_code=500, detail=f"Failed to get column info: {str(e)}")
     finally:
         con.close()
+
+@app.post("/reset-db")
+def reset_db(keep_raw: bool = False, drop_canonical: bool = True):
+    """
+    Drop tables and recreate only the necessary registry tables.
+    WARNING: This will delete all ingested data! Use with caution.
+    
+    Args:
+        keep_raw: If True, keep raw__* tables (only drop canonical/registry tables)
+        drop_canonical: If True, drop canonical tables (invoices, payments, expenses, bank_txns)
+    """
+    try:
+        result = reset_database(DB_PATH, keep_raw_tables=keep_raw, drop_canonical=drop_canonical)
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

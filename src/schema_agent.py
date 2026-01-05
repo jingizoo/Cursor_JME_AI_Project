@@ -35,7 +35,13 @@ def infer_sheet_mapping(*, base_url: str, model: str, file: str, sheet: str, sch
         "- bank_txns: txn_date, description, amount, direction, reference (or credit/debit columns)\n"
         "JSON format:\n"
         "{\"sheet_type\":\"...\",\"confidence\":0-1,\"mapping\":{...},\"notes\":\"...\"}\n"
-        "If unsure: sheet_type=unknown, mapping={}, confidence low."
+        "Confidence guidelines:\n"
+        "- 0.9-1.0: Clear match with multiple canonical fields found\n"
+        "- 0.7-0.8: Good match with some canonical fields found\n"
+        "- 0.5-0.6: Partial match with few canonical fields\n"
+        "- 0.3-0.4: Weak match, uncertain classification\n"
+        "- 0.0-0.2: No clear match, use 'unknown' type\n"
+        "If you find 3+ matching canonical fields, use confidence >= 0.7. If unsure: sheet_type=unknown, mapping={}, confidence=0.2."
     )
     user = json.dumps({"file": file, "sheet": sheet, "schema": schema}, ensure_ascii=False)
 
@@ -54,5 +60,23 @@ def infer_sheet_mapping(*, base_url: str, model: str, file: str, sheet: str, sch
         st = "unknown"
     mapping = obj.get("mapping") if isinstance(obj.get("mapping"), dict) else {}
     conf = float(obj.get("confidence", 0.0) or 0.0)
+    
+    # If confidence is very low or missing, calculate based on mapping quality
+    if conf < 0.3 and mapping:
+        # Calculate confidence based on number of mapped fields
+        canonical_fields = {
+            "invoices": ["invoice_id", "invoice_date", "due_date", "client", "taxable_value", "gst_amount", "invoice_total"],
+            "payments": ["payment_date", "invoice_id", "client", "amount", "bank_ref", "mode"],
+            "expenses": ["expense_date", "vendor", "category", "taxable_value", "gst_amount", "tds_amount", "paid_amount"],
+            "bank_txns": ["txn_date", "description", "amount", "direction", "reference"]
+        }
+        if st in canonical_fields:
+            mapped_count = len([k for k in mapping.keys() if k in canonical_fields[st]])
+            total_fields = len(canonical_fields[st])
+            # Confidence = percentage of fields mapped, with minimum 0.3 for any mapping
+            calculated_conf = max(0.3, min(0.95, mapped_count / total_fields))
+            # Use the higher of LLM confidence or calculated confidence
+            conf = max(conf, calculated_conf)
+    
     notes = str(obj.get("notes",""))[:500]
     return {"sheet_type": st, "confidence": conf, "mapping": mapping, "notes": notes, "raw": text[:800]}
