@@ -19,7 +19,7 @@ fi
 export JME_DATA_DIR="${JME_DATA_DIR:-./data}"
 export JME_CACHE_DIR="${JME_CACHE_DIR:-./.cache}"
 export OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
-export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3:8b}"
+export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:3b}"
 
 # Create directories if they don't exist
 mkdir -p "$JME_DATA_DIR"

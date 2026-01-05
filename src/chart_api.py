@@ -28,7 +28,7 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = CACHE_DIR / "pipeline.duckdb"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")  # CPU-friendly default
 
 app = FastAPI(title="JME AI Finance Pipeline - Chart API")
 

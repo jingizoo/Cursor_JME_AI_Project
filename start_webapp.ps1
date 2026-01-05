@@ -18,7 +18,7 @@ try {
 $env:JME_DATA_DIR = if ($env:JME_DATA_DIR) { $env:JME_DATA_DIR } else { (Resolve-Path ".\data").Path }
 $env:JME_CACHE_DIR = if ($env:JME_CACHE_DIR) { $env:JME_CACHE_DIR } else { (Resolve-Path ".\.cache").Path }
 if (-not $env:OLLAMA_URL) { $env:OLLAMA_URL = "http://localhost:11434" }
-if (-not $env:OLLAMA_MODEL) { $env:OLLAMA_MODEL = "qwen3:8b" }
+if (-not $env:OLLAMA_MODEL) { $env:OLLAMA_MODEL = "qwen2.5:3b" }
 
 New-Item -ItemType Directory -Force -Path $env:JME_DATA_DIR | Out-Null
 New-Item -ItemType Directory -Force -Path $env:JME_CACHE_DIR | Out-Null

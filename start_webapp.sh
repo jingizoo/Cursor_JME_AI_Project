@@ -12,7 +12,7 @@ python -c "import matplotlib" >/dev/null 2>&1 || pip install -r requirements.txt
 export JME_DATA_DIR="${JME_DATA_DIR:-./data}"
 export JME_CACHE_DIR="${JME_CACHE_DIR:-./.cache}"
 export OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
-export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3:8b}"
+export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:3b}"
 
 mkdir -p "$JME_DATA_DIR" "$JME_CACHE_DIR"
 
