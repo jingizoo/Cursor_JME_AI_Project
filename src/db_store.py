@@ -10,56 +10,8 @@ import pandas as pd
 # Connection lock to prevent concurrent access issues
 _db_lock = threading.Lock()
 
+# Only registry tables - all data tables are created at runtime from ingested files
 CANON_DDL = [
-    """
-    CREATE TABLE IF NOT EXISTS invoices (
-        source_file TEXT,
-        source_sheet TEXT,
-        invoice_id TEXT,
-        invoice_date DATE,
-        due_date DATE,
-        client TEXT,
-        taxable_value DOUBLE,
-        gst_amount DOUBLE,
-        invoice_total DOUBLE
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS payments (
-        source_file TEXT,
-        source_sheet TEXT,
-        payment_date DATE,
-        invoice_id TEXT,
-        client TEXT,
-        amount DOUBLE,
-        bank_ref TEXT,
-        mode TEXT
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS expenses (
-        source_file TEXT,
-        source_sheet TEXT,
-        expense_date DATE,
-        vendor TEXT,
-        category TEXT,
-        taxable_value DOUBLE,
-        gst_amount DOUBLE,
-        tds_amount DOUBLE,
-        paid_amount DOUBLE
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS bank_txns (
-        source_file TEXT,
-        source_sheet TEXT,
-        txn_date DATE,
-        description TEXT,
-        amount DOUBLE,
-        direction TEXT,
-        reference TEXT
-    )
-    """,
     """
     CREATE TABLE IF NOT EXISTS schema_registry (
         file TEXT,

@@ -92,7 +92,7 @@ def _schema_for_llm(con, question: str, max_tables: int = None, max_cols_per_tab
         if tname.lower() in question_lower:
             explicitly_mentioned.append(tname)
     
-    # If max_tables is set, prioritize: explicitly mentioned > raw tables > canonical tables
+    # If max_tables is set, prioritize: explicitly mentioned > raw tables (most recent first)
     if max_tables and len(data_tables) > max_tables:
         selected = list(explicitly_mentioned)
         
@@ -109,11 +109,7 @@ def _schema_for_llm(con, question: str, max_tables: int = None, max_cols_per_tab
             except Exception:
                 pass
         
-        canonical_tables = ["invoices", "payments", "expenses", "bank_txns"]
-        for t in canonical_tables:
-            if t in existing_set and t not in selected and len(selected) < max_tables:
-                selected.append(t)
-        
+        # Finally, add any remaining tables
         for t in data_tables:
             if t not in selected and len(selected) < max_tables:
                 selected.append(t)
@@ -121,12 +117,14 @@ def _schema_for_llm(con, question: str, max_tables: int = None, max_cols_per_tab
         # Include ALL tables (no limit)
         selected = data_tables
     
-    tables: dict[str, list[dict[str, str]]] = {}
+    # ✅ Names-only schema payload (smaller + easier for LLM)
+    tables: dict[str, list[str]] = {}
     for t in selected:
-        if t.lower() in question_lower and max_cols_per_table:
-            tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table * 2)
-        else:
-            tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
+        # For explicitly mentioned tables, include more columns if limit is set
+        col_limit = max_cols_per_table * 2 if (t.lower() in question_lower and max_cols_per_table) else max_cols_per_table
+        cols = _get_table_info_cached(con, t, max_cols=col_limit)
+        tables[t] = [c["name"] for c in cols]
+
     return {"tables": tables}
 
 def _tables_preview(con, max_tables: int = 30):

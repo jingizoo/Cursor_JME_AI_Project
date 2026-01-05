@@ -12,14 +12,14 @@ Usage:
 from pathlib import Path
 from .db_store import connect, CANON_DDL
 
-def reset_database(db_path: Path, keep_raw_tables: bool = False, drop_canonical: bool = True) -> dict:
+def reset_database(db_path: Path, keep_raw_tables: bool = False) -> dict:
     """
     Drop tables and recreate only the necessary registry tables.
+    All data tables are created at runtime from ingested files.
     
     Args:
         db_path: Path to the DuckDB database file
-        keep_raw_tables: If True, keep raw__* tables (only drop canonical/registry tables)
-        drop_canonical: If True, drop canonical tables (invoices, payments, expenses, bank_txns)
+        keep_raw_tables: If True, keep raw__* tables (only drop registry tables)
         
     Returns:
         dict with status and information about what was dropped/recreated
@@ -33,14 +33,13 @@ def reset_database(db_path: Path, keep_raw_tables: bool = False, drop_canonical:
         existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
         
         # Determine which tables to drop
-        canonical_tables = ["invoices", "payments", "expenses", "bank_txns"]
         registry_tables = ["schema_registry", "raw_sheet_registry"]
         
         if keep_raw_tables:
-            # Only drop canonical and registry tables, keep raw__* tables
-            tables_to_drop = [t for t in existing_tables if not t.startswith("raw__")]
+            # Only drop registry tables, keep raw__* tables
+            tables_to_drop = [t for t in existing_tables if t in registry_tables]
         else:
-            # Drop ALL tables
+            # Drop ALL tables (including all raw__* tables)
             tables_to_drop = existing_tables
         
         # Drop tables
@@ -52,17 +51,9 @@ def reset_database(db_path: Path, keep_raw_tables: bool = False, drop_canonical:
             except Exception as e:
                 print(f"Warning: Could not drop table {table}: {e}")
         
-        # Only recreate registry tables (schema_registry, raw_sheet_registry)
-        # Skip canonical tables if drop_canonical is True
-        ddl_to_execute = []
-        if not drop_canonical:
-            # Recreate canonical tables if requested
-            ddl_to_execute.extend(CANON_DDL[:4])  # First 4 are canonical tables
-        
-        # Always recreate registry tables
-        ddl_to_execute.extend(CANON_DDL[4:])  # Last 2 are registry tables
-        
-        for ddl in ddl_to_execute:
+        # Recreate only registry tables (schema_registry, raw_sheet_registry)
+        # All data tables are created at runtime from ingested files
+        for ddl in CANON_DDL:
             try:
                 con.execute(ddl)
             except Exception as e:
@@ -71,11 +62,8 @@ def reset_database(db_path: Path, keep_raw_tables: bool = False, drop_canonical:
         # Verify tables were created
         recreated = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
         
-        # Expected tables based on drop_canonical flag
-        if drop_canonical:
-            expected_tables = registry_tables
-        else:
-            expected_tables = canonical_tables + registry_tables
+        # Expected tables: only registry tables
+        expected_tables = registry_tables
         
         missing = [t for t in expected_tables if t not in recreated]
         
@@ -100,12 +88,10 @@ if __name__ == "__main__":
     
     # Parse command line args
     keep_raw = "--keep-raw" in sys.argv
-    keep_canonical = "--keep-canonical" in sys.argv
-    drop_canonical = not keep_canonical
     
     print(f"Resetting database at: {DB_PATH}")
-    print(f"Options: keep_raw={keep_raw}, drop_canonical={drop_canonical}")
-    result = reset_database(DB_PATH, keep_raw_tables=keep_raw, drop_canonical=drop_canonical)
+    print(f"Options: keep_raw={keep_raw}")
+    result = reset_database(DB_PATH, keep_raw_tables=keep_raw)
     print(f"\n{result['message']}")
     print(f"\nDropped tables: {result['dropped_tables']}")
     print(f"Recreated tables: {result['recreated_tables']}")

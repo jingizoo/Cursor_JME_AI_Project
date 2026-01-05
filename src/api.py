@@ -58,15 +58,8 @@ def _get_table_info_cached(con, table: str, max_cols: int = None) -> list[dict[s
     return out
 
 def _guess_intent(question: str) -> str | None:
-    q = (question or "").lower()
-    if any(k in q for k in ["invoice", "gst", "tax invoice", "bill"]):
-        return "invoices"
-    if any(k in q for k in ["payment", "receipt", "paid", "utr", "neft", "imps", "rtgs"]):
-        return "payments"
-    if any(k in q for k in ["expense", "vendor", "tds", "reimbursement"]):
-        return "expenses"
-    if any(k in q for k in ["bank", "txn", "transaction", "statement", "credit", "debit"]):
-        return "bank_txns"
+    # No predefined intents - all data is analyzed dynamically
+    # This function is kept for compatibility but returns None
     return None
 
 def _schema_for_llm(con, question: str, max_tables: int | None = None, max_cols_per_table: int | None = None) -> dict:
@@ -87,61 +80,39 @@ def _schema_for_llm(con, question: str, max_tables: int | None = None, max_cols_
 
     qlow = (question or "").lower()
 
-    canonical_tables = [t for t in ["invoices", "payments", "expenses", "bank_txns"] if t in existing_set]
-
     explicitly_mentioned = [t for t in data_tables if t.lower() in qlow]
 
-    # Prefer raw tables relevant to the question intent (via schema_registry.sheet_type)
-    intent = _guess_intent(question)
+    # Get raw tables (all data tables are raw tables created at runtime)
     raw_candidates: list[str] = [t for t in data_tables if t.startswith("raw__") or t.startswith("raw_")]
 
+    # Order raw tables by most recent
     ordered_raw: list[str] = []
-    if intent and ("schema_registry" in existing_set) and ("raw_sheet_registry" in existing_set):
+    if "raw_sheet_registry" in existing_set:
         try:
             rows = con.execute(
-                """
-                SELECT r.raw_table
-                FROM raw_sheet_registry r
-                JOIN schema_registry s
-                  ON s.file=r.file AND s.sheet=r.sheet AND s.file_size=r.file_size AND s.file_mtime=r.file_mtime
-                WHERE s.sheet_type = ?
-                ORDER BY r.updated_ts DESC
-                """,
-                [intent],
+                "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC"
             ).fetchall()
             ordered_raw = [r[0] for r in rows if r and r[0] in raw_candidates]
         except Exception:
-            ordered_raw = []
-    if not ordered_raw:
-        # fallback: most recent raw tables
-        if "raw_sheet_registry" in existing_set:
-            try:
-                rows = con.execute(
-                    "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC"
-                ).fetchall()
-                ordered_raw = [r[0] for r in rows if r and r[0] in raw_candidates]
-            except Exception:
-                ordered_raw = raw_candidates
-        else:
             ordered_raw = raw_candidates
+    else:
+        ordered_raw = raw_candidates
 
     # ✅ Build selected table list with strict cap
     selected: list[str] = []
+    # First, add explicitly mentioned tables
     for t in explicitly_mentioned:
         if t not in selected:
             selected.append(t)
-    for t in canonical_tables:
-        if t not in selected:
-            selected.append(t)
 
-    # include only a few raw tables by default (big prompt saver)
+    # Then, include raw tables (most recent first)
     for t in ordered_raw:
         if t not in selected:
             selected.append(t)
         if len(selected) >= max_tables:
             break
 
-    # if still room, include other mentioned tables (rare)
+    # If still room, include other tables
     for t in data_tables:
         if len(selected) >= max_tables:
             break
@@ -151,9 +122,8 @@ def _schema_for_llm(con, question: str, max_tables: int | None = None, max_cols_
     # ✅ Names-only schema payload (smaller + easier for LLM)
     tables: dict[str, list[str]] = {}
     for t in selected:
-        # include all columns for canonical (small), cap for raw/others
-        col_limit = None if t in canonical_tables else max_cols_per_table
-        cols = _get_table_info_cached(con, t, max_cols=col_limit)
+        # All tables get the same column limit (no special handling for canonical)
+        cols = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
         tables[t] = [c["name"] for c in cols]
 
     return {"tables": tables}
@@ -627,17 +597,17 @@ def get_table_columns(table_name: str):
         con.close()
 
 @app.post("/reset-db")
-def reset_db(keep_raw: bool = False, drop_canonical: bool = True):
+def reset_db(keep_raw: bool = False):
     """
     Drop tables and recreate only the necessary registry tables.
+    All data tables are created at runtime from ingested files.
     WARNING: This will delete all ingested data! Use with caution.
     
     Args:
-        keep_raw: If True, keep raw__* tables (only drop canonical/registry tables)
-        drop_canonical: If True, drop canonical tables (invoices, payments, expenses, bank_txns)
+        keep_raw: If True, keep raw__* tables (only drop registry tables)
     """
     try:
-        result = reset_database(DB_PATH, keep_raw_tables=keep_raw, drop_canonical=drop_canonical)
+        result = reset_database(DB_PATH, keep_raw_tables=keep_raw)
         return result
     except Exception as e:
         return {"ok": False, "error": str(e)}

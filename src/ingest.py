@@ -255,7 +255,8 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                     "notes": mapping_rec.get("notes",""),
                 })
 
-                normalize_and_insert(con, xf.name, sheet, mapping_rec["sheet_type"], mapping_rec["mapping"], df)
+                # Note: normalize_and_insert is no longer used - we only create raw tables
+                # The raw table is already created above via materialize_raw_sheet()
                 ingested += 1
 
             except Exception as e:
@@ -333,7 +334,8 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                         "notes": mapping_rec.get("notes",""),
                     })
 
-                    normalize_and_insert(con, pdf_path.name, sheet, mapping_rec["sheet_type"], mapping_rec["mapping"], df)
+                    # Note: normalize_and_insert is no longer used - we only create raw tables
+                    # The raw table is already created above via materialize_raw_sheet()
                     ingested += 1
 
                 except Exception as e:
