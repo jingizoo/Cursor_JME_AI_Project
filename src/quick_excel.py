@@ -18,6 +18,7 @@ except ImportError:
     PDF_AVAILABLE = False
 
 from .llm_client import ollama_chat, extract_json
+from .utils_columns import normalize_columns
 
 SAFE_SQL_DENY = ["insert", "update", "delete", "drop", "alter", "create", "attach", "detach", "copy", "pragma", "call"]
 
@@ -50,19 +51,7 @@ def read_sheet(xbytes: bytes, sheet: str) -> pd.DataFrame:
     hdr = detect_header_row(xbytes, sheet)
     df = pd.read_excel(io.BytesIO(xbytes), sheet_name=sheet, header=hdr, engine="openpyxl")
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
-    # Ensure column names are strings and unique
-    cols = [str(c) for c in df.columns]
-    seen = {}
-    fixed = []
-    for c in cols:
-        base = c.strip() or "col"
-        if base not in seen:
-            seen[base] = 0
-            fixed.append(base)
-        else:
-            seen[base] += 1
-            fixed.append(f"{base}_{seen[base]}")
-    df.columns = fixed
+    df = normalize_columns(df)  # ✅ same behavior as ingestion
     return df
 
 def validate_sql(sql: str) -> bool:
@@ -185,8 +174,8 @@ def extract_pdf_tables_from_bytes(fbytes: bytes) -> List[Dict[str, Any]]:
                 for table_idx, table in enumerate(page_tables):
                     if table and len(table) > 1:
                         df = pd.DataFrame(table[1:], columns=table[0] if table[0] else None)
-                        df.columns = [str(c).strip() if c else f"col_{i}" for i, c in enumerate(df.columns)]
                         df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+                        df = normalize_columns(df)  # ✅
                         if df.shape[0] > 0 and df.shape[1] > 0:
                             tables.append({
                                 "page": page_num,

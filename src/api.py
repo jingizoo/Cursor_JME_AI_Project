@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -44,18 +45,20 @@ def df_to_records_safe(df: pd.DataFrame):
         return v
     return [clean_value(r) for r in records]
 
-_DB_MTIME_CACHE: float | None = None
-_TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}
-_PLAN_CACHE: dict[tuple[str, str], dict[str, str]] = {}  # Cache SQL plans by (question, model)
+_DB_SIG_CACHE: tuple[int, int] | None = None  # (mtime_ns, size)
+_TABLE_INFO_CACHE: dict[tuple[str, int | None], list[dict[str, str]]] = {}
+_PLAN_CACHE: dict[tuple[str, str, tuple[int, int] | None], dict[str, str]] = {}  # Cache SQL plans by (question, model, db_sig)
 
 def _maybe_invalidate_schema_cache() -> None:
-    global _DB_MTIME_CACHE, _TABLE_INFO_CACHE, _PLAN_CACHE
+    global _DB_SIG_CACHE, _TABLE_INFO_CACHE, _PLAN_CACHE
     try:
-        mtime = DB_PATH.stat().st_mtime
+        st = DB_PATH.stat()
+        sig = (st.st_mtime_ns, st.st_size)
     except Exception:
-        mtime = None
-    if _DB_MTIME_CACHE != mtime:
-        _DB_MTIME_CACHE = mtime
+        sig = None
+
+    if _DB_SIG_CACHE != sig:
+        _DB_SIG_CACHE = sig
         _TABLE_INFO_CACHE = {}
         _PLAN_CACHE = {}  # Invalidate plan cache when DB changes
 
@@ -78,88 +81,104 @@ def _get_table_info_cached(con, table: str, max_cols: int = None) -> list[dict[s
     _TABLE_INFO_CACHE[cache_key] = out
     return out
 
-def _schema_for_llm(con, question: str, max_tables: int = None, max_cols_per_table: int = None) -> dict:
-    """
-    Build schema payload for the LLM. Includes ALL tables dynamically by default.
-    Can be limited via environment variables for performance.
-    
-    Args:
-        con: DuckDB connection
-        question: User question (used for relevance matching)
-        max_tables: Maximum number of tables to include (None = all tables, configurable via JME_MAX_TABLES env var)
-        max_cols_per_table: Maximum columns per table (None = all columns, configurable via JME_MAX_COLS env var)
-    """
+def _guess_intent(question: str) -> str | None:
+    q = (question or "").lower()
+    if any(k in q for k in ["invoice", "gst", "tax invoice", "bill"]):
+        return "invoices"
+    if any(k in q for k in ["payment", "receipt", "paid", "utr", "neft", "imps", "rtgs"]):
+        return "payments"
+    if any(k in q for k in ["expense", "vendor", "tds", "reimbursement"]):
+        return "expenses"
+    if any(k in q for k in ["bank", "txn", "transaction", "statement", "credit", "debit"]):
+        return "bank_txns"
+    return None
+
+def _schema_for_llm(con, question: str, max_tables: int | None = None, max_cols_per_table: int | None = None) -> dict:
     import os
-    
-    # Get limits from environment variables or use defaults
+
+    # ✅ Make sane CPU defaults (override still possible via env)
     if max_tables is None:
-        max_tables = int(os.getenv("JME_MAX_TABLES", "0"))  # 0 means unlimited/all tables
-        if max_tables == 0:
-            max_tables = None  # None means include all
-    
+        env = int(os.getenv("JME_MAX_TABLES", "12"))   # ✅ default cap (fast on CPU)
+        max_tables = None if env <= 0 else env
     if max_cols_per_table is None:
-        max_cols_per_table = int(os.getenv("JME_MAX_COLS", "50"))  # Default 50 columns per table
-    
-    # Get all existing tables
-    existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
-    existing_set = set(existing_tables)
-    
-    # Filter out registry/metadata tables (keep them separate, don't send to LLM)
+        env = int(os.getenv("JME_MAX_COLS", "25"))     # ✅ default cap
+        max_cols_per_table = None if env <= 0 else env
+
     registry_tables = {"schema_registry", "raw_sheet_registry"}
+    existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
     data_tables = [t for t in existing_tables if t not in registry_tables]
-    
-    question_lower = (question or "").lower()
-    
-    # Check if question explicitly mentions any table names
-    explicitly_mentioned = []
-    for tname in data_tables:
-        if tname.lower() in question_lower:
-            explicitly_mentioned.append(tname)
-    
-    # If max_tables is set, prioritize: explicitly mentioned > raw tables > canonical tables
-    if max_tables and len(data_tables) > max_tables:
-        # Always include explicitly mentioned tables
-        selected = list(explicitly_mentioned)
-        
-        # Then add raw tables (most recent first)
-        raw_tables = [t for t in data_tables if t.startswith("raw_") and t not in selected]
+    existing_set = set(existing_tables)
+
+    qlow = (question or "").lower()
+
+    canonical_tables = [t for t in ["invoices", "payments", "expenses", "bank_txns"] if t in existing_set]
+
+    explicitly_mentioned = [t for t in data_tables if t.lower() in qlow]
+
+    # Prefer raw tables relevant to the question intent (via schema_registry.sheet_type)
+    intent = _guess_intent(question)
+    raw_candidates: list[str] = [t for t in data_tables if t.startswith("raw__") or t.startswith("raw_")]
+
+    ordered_raw: list[str] = []
+    if intent and ("schema_registry" in existing_set) and ("raw_sheet_registry" in existing_set):
+        try:
+            rows = con.execute(
+                """
+                SELECT r.raw_table
+                FROM raw_sheet_registry r
+                JOIN schema_registry s
+                  ON s.file=r.file AND s.sheet=r.sheet AND s.file_size=r.file_size AND s.file_mtime=r.file_mtime
+                WHERE s.sheet_type = ?
+                ORDER BY r.updated_ts DESC
+                """,
+                [intent],
+            ).fetchall()
+            ordered_raw = [r[0] for r in rows if r and r[0] in raw_candidates]
+        except Exception:
+            ordered_raw = []
+    if not ordered_raw:
+        # fallback: most recent raw tables
         if "raw_sheet_registry" in existing_set:
             try:
                 rows = con.execute(
                     "SELECT raw_table FROM raw_sheet_registry ORDER BY updated_ts DESC"
                 ).fetchall()
-                ordered_raw = [r[0] for r in rows if r and r[0] and r[0] in raw_tables]
-                # Add ordered raw tables
-                for t in ordered_raw:
-                    if t not in selected and len(selected) < max_tables:
-                        selected.append(t)
+                ordered_raw = [r[0] for r in rows if r and r[0] in raw_candidates]
             except Exception:
-                pass
-        
-        # Then add canonical tables
-        canonical_tables = ["invoices", "payments", "expenses", "bank_txns"]
-        for t in canonical_tables:
-            if t in existing_set and t not in selected and len(selected) < max_tables:
-                selected.append(t)
-        
-        # Finally, add any remaining tables
-        for t in data_tables:
-            if t not in selected and len(selected) < max_tables:
-                selected.append(t)
-    else:
-        # Include ALL tables (no limit)
-        selected = data_tables
-    
-    # Build schema with all selected tables
-    tables: dict[str, list[dict[str, str]]] = {}
-    for t in selected:
-        # For explicitly mentioned tables, include more columns if limit is set
-        if t.lower() in question_lower and max_cols_per_table:
-            # Include more columns for tables mentioned in question
-            tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table * 2)
+                ordered_raw = raw_candidates
         else:
-            # Use configured limit or None (all columns)
-            tables[t] = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
+            ordered_raw = raw_candidates
+
+    # ✅ Build selected table list with strict cap
+    selected: list[str] = []
+    for t in explicitly_mentioned:
+        if t not in selected:
+            selected.append(t)
+    for t in canonical_tables:
+        if t not in selected:
+            selected.append(t)
+
+    # include only a few raw tables by default (big prompt saver)
+    for t in ordered_raw:
+        if t not in selected:
+            selected.append(t)
+        if len(selected) >= max_tables:
+            break
+
+    # if still room, include other mentioned tables (rare)
+    for t in data_tables:
+        if len(selected) >= max_tables:
+            break
+        if t not in selected:
+            selected.append(t)
+
+    # ✅ Names-only schema payload (smaller + easier for LLM)
+    tables: dict[str, list[str]] = {}
+    for t in selected:
+        # include all columns for canonical (small), cap for raw/others
+        col_limit = None if t in canonical_tables else max_cols_per_table
+        cols = _get_table_info_cached(con, t, max_cols=col_limit)
+        tables[t] = [c["name"] for c in cols]
 
     return {"tables": tables}
 
@@ -170,6 +189,46 @@ def _tables_preview(con, max_tables: int = 30) -> List[str]:
         return names[:max_tables]
     except Exception:
         return []
+
+_COL_RE = re.compile(r"^col_\d+$", re.IGNORECASE)
+
+def _repair_missing_col(sql: str, err: str) -> str | None:
+    """
+    If DuckDB says referenced col_X not found but provides candidate col_Y...
+    rewrite SQL to closest candidate and return new SQL.
+    """
+    if not sql or not err:
+        return None
+
+    m = re.search(r'Referenced column "([^"]+)" not found', err, re.IGNORECASE)
+    if not m:
+        return None
+    missing = m.group(1)
+
+    if not _COL_RE.fullmatch(missing):
+        return None
+
+    if "Candidate bindings:" not in err:
+        return None
+    tail = err.split("Candidate bindings:", 1)[1]
+    candidates = re.findall(r'"([^"]+)"', tail)
+    cand_cols = [c for c in candidates if _COL_RE.fullmatch(c)]
+    if not cand_cols:
+        return None
+
+    miss_idx = int(missing.split("_")[1])
+    cand_pairs = [(c, int(c.split("_")[1])) for c in cand_cols]
+    replacement = min(cand_pairs, key=lambda p: abs(p[1] - miss_idx))[0]
+    if replacement.lower() == missing.lower():
+        return None
+
+    sql2 = sql
+    # handle quoted, backticked, and bare identifiers
+    sql2 = sql2.replace(f'"{missing}"', f'"{replacement}"')
+    sql2 = sql2.replace(f'`{missing}`', f'`{replacement}`')
+    sql2 = re.sub(rf"\b{re.escape(missing)}\b", replacement, sql2)
+
+    return sql2 if sql2 != sql else None
 
 def _build_no_answer_hint(*, con, question: str, sql: str = "", error: str = "", empty: bool = False) -> str:
     tables = _tables_preview(con)
@@ -207,7 +266,7 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = CACHE_DIR / "pipeline.duckdb"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")  # CPU-friendly default
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "300"))  # Default 5 minutes (300 seconds)
 
 app = FastAPI(title="JME AI Finance Pipeline (Dynamic Excel)")
@@ -283,7 +342,8 @@ def ask(req: AskReq):
         timings["schema_build_ms"] = round((time.time() - t0) * 1000, 2)
         
         # Check plan cache first (performance optimization)
-        cache_key = (req.question.strip(), OLLAMA_MODEL)
+        _maybe_invalidate_schema_cache()
+        cache_key = (req.question.strip(), OLLAMA_MODEL, _DB_SIG_CACHE)
         cached = _PLAN_CACHE.get(cache_key)
         if cached and cached.get("sql"):
             sql = cached["sql"]
@@ -320,6 +380,29 @@ def ask(req: AskReq):
         except Exception as e:
             err = f"{e}"
             timings["sql_exec_ms"] = round((time.time() - t2) * 1000, 2)
+
+            # ✅ Auto-repair missing column errors (simple SQL rewrite, no LLM retry)
+            repaired_sql = _repair_missing_col(sql, err)
+            if repaired_sql:
+                try:
+                    df = con.execute(repaired_sql).df()
+                    timings["sql_exec_ms"] = round((time.time() - t2) * 1000, 2)
+                    rows = df_to_records_safe(df) if df is not None and df.shape[0] else []
+                    # cache repaired plan
+                    _PLAN_CACHE[cache_key] = {"sql": repaired_sql, "notes": plan.get("notes", "")}
+                    return {
+                        "ok": True,
+                        "sql": repaired_sql,
+                        "rows": rows,
+                        "notes": plan.get("notes", ""),
+                        "model": OLLAMA_MODEL,
+                        "timings_ms": timings,
+                        "total_ms": round((time.time() - start_time) * 1000, 2),
+                        "repaired": True,
+                        "repair_reason": "duckdb_binder_missing_col",
+                    }
+                except Exception:
+                    pass  # fall through to normal error response
             
             # Provide helpful hint for common errors
             hint = _build_no_answer_hint(con=con, question=req.question, sql=sql, error=err)
@@ -328,11 +411,10 @@ def ask(req: AskReq):
             elif "syntax error" in err.lower() or "parser error" in err.lower():
                 hint += " TIP: SQL syntax error detected. Common issues: 1) Using backticks instead of double quotes for identifiers (DuckDB uses double quotes), 2) Unclosed parentheses/quotes, 3) Missing commas in SELECT lists. The system will auto-fix backticks, but check for other syntax issues."
             elif "binder error" in err.lower() or "referenced column" in err.lower() or "not found" in err.lower():
-                # Extract candidate columns from error message if available
-                import re
-                candidate_match = re.search(r'Candidate bindings:\s*"([^"]+)"(?:\s*,\s*"([^"]+)")*', err, re.IGNORECASE)
-                if candidate_match:
-                    candidates = [c for c in candidate_match.groups() if c]
+                # Extract ALL candidate columns from error message
+                tail = err.split("Candidate bindings:", 1)[1] if "Candidate bindings:" in err else ""
+                candidates = re.findall(r'"([^"]+)"', tail)
+                if candidates:
                     hint += f" TIP: Column not found. Available columns: {', '.join(candidates)}. The LLM must use ONLY columns that exist in the schema. Check the schema provided to the LLM and use exact column names."
                 else:
                     hint += " TIP: Column not found error. The LLM must use ONLY columns that exist in the provided schema. Check /api/v1/schema or /api/v1/table/<table>/columns to see available columns, then re-ask with exact column names."

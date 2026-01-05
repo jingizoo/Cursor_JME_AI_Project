@@ -70,45 +70,38 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
         except Exception as e:
             print(f"Warning: PDF context search failed: {e}")
     
-    # Build system prompt with PDF context if available
-    # Keep prompt SHORT to reduce LLM processing time
-    # CRITICAL: Emphasize JSON-only output with no explanatory text
+    # Build system prompt - shorter and schema-format-accurate
     system_parts = [
-        "You are a SQL generator. Your response must be ONLY valid JSON.\n",
+        "You are a DuckDB SQL generator. Return ONLY valid JSON.\n",
         "CRITICAL RULES:\n",
-        "1. Start your response with { (opening brace)\n",
-        "2. End your response with } (closing brace)\n",
-        "3. NO text before the opening brace\n",
-        "4. NO text after the closing brace\n",
-        "5. NO explanations, NO comments, NO markdown\n",
-        "6. ALWAYS generate SQL - even if unsure, make your best attempt\n",
-        "7. CRITICAL: Use ONLY column names that exist in the provided schema. Do NOT invent column names.\n",
-        "8. If a column name is unclear, check the schema's 'columns' list for each table. Use exact column names from the schema.\n",
-        "9. For raw tables (starting with 'raw_'), columns are typically named 'col_0', 'col_1', 'col_2', etc. BUT check the schema to see which ones actually exist - not all tables have col_0!\n",
-        "10. Output ONLY: {\"sql\":\"SELECT ...\",\"notes\":\"...\"}\n",
-        "Example: {\"sql\":\"SELECT COUNT(*) as count FROM table_name LIMIT 200\",\"notes\":\"\"}\n",
-        "Rules: SELECT/CTE only. Add LIMIT 200. Always provide SQL, never leave sql field empty.\n",
+        "1) Response must start with '{' and end with '}'.\n",
+        "2) No text outside the JSON.\n",
+        "3) Output JSON: {\"sql\":\"...\",\"notes\":\"...\"}\n",
+        "4) SQL must be ONE statement only. SELECT or WITH only.\n",
+        "5) No writes (INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/etc).\n",
+        "6) ALWAYS add LIMIT 200.\n",
+        "7) Use ONLY tables/columns that exist in schema.\n",
         "\n",
-        "SQL SYNTAX RULES (DuckDB):\n",
-        "- Use DOUBLE QUOTES for table/column names (NOT backticks): \"table_name\", \"column_name\"\n",
-        "- Example: SELECT \"col_1\" FROM \"raw_table_name\" (correct)\n",
-        "- WRONG: SELECT `col_1` FROM `raw_table_name` (backticks are invalid in DuckDB)\n",
-        "- Always close all parentheses and quotes properly\n",
+        "SCHEMA FORMAT:\n",
+        "- schema.tables is an object: { table_name: [\"col1\",\"col2\", ...] }\n",
+        "- Use ONLY those column strings.\n",
         "\n",
-        "IMPORTANT: When casting strings to numbers (DECIMAL, INTEGER, etc.):\n",
-        "- Handle empty strings and NULL values: use NULLIF(TRIM(col), '') or filter them out\n",
-        "- Example: CAST(NULLIF(TRIM(REPLACE(\"col\", ',', '')), '') AS DECIMAL) instead of CAST(REPLACE(\"col\", ',', '') AS DECIMAL)\n",
-        "- Or use: CAST(CASE WHEN TRIM(\"col\") = '' OR \"col\" IS NULL THEN NULL ELSE REPLACE(\"col\", ',', '') END AS DECIMAL)\n",
-        "- Always validate numeric conversions to avoid conversion errors.\n"
+        "IMPORTANT (JSON SAFETY):\n",
+        "- Do NOT use double-quotes for identifiers inside SQL (it breaks JSON escaping).\n",
+        "- Prefer bare identifiers: SELECT col_0 FROM raw__... LIMIT 200\n",
+        "- If you must quote identifiers, use backticks (`) not double quotes.\n",
+        "\n",
+        "Example:\n",
+        "{\"sql\":\"SELECT col_0, col_1 FROM raw__table LIMIT 200\",\"notes\":\"\"}\n",
     ]
+    
+    system = "".join(system_parts)
     
     if pdf_context:
         # Keep PDF context brief to reduce prompt size
-        system_parts.append("\nPDF context:")
+        system += "\nPDF context:\n"
         for i, ctx in enumerate(pdf_context[:2], 1):  # Limit to 2 contexts
-            system_parts.append(f"\n[{i}] {ctx.get('text', '')[:150]}...")  # Reduced from 300 to 150
-    
-    system = "".join(system_parts)
+            system += f"[{i}] {ctx.get('text', '')[:150]}...\n"  # Reduced from 300 to 150
     
     # Build user message with schema and question
     # Keep it compact - only essential info
@@ -122,7 +115,7 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     # Use num_predict to limit generation and speed up (SQL is usually short)
     # For smaller models (3b), use lower limits. For larger models (8b+), use higher limits.
     # Make it configurable via environment variable
-    default_num_predict = 1024 if "3b" in model.lower() or "1b" in model.lower() else 2048
+    default_num_predict = 512 if ("3b" in model.lower() or "1b" in model.lower()) else 1024
     num_predict_limit = int(os.getenv("OLLAMA_NUM_PREDICT", str(default_num_predict)))
     
     # Timeout: smaller models might be slower, but also might hang. Use configurable timeout.

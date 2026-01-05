@@ -95,7 +95,7 @@ if ($ollamaFound) {
         Write-Host "✓ Ollama is running" -ForegroundColor Green
         
         # Check for LLM model
-        $llmModel = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { "qwen3:8b" }
+        $llmModel = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { "qwen2.5:3b" }
         Write-Host "   Checking for LLM model: $llmModel" -ForegroundColor Gray
         $models = ollama list
         if ($models -match $llmModel) {
@@ -125,13 +125,13 @@ if ($ollamaFound) {
     } catch {
         Write-Host "⚠️  Ollama is not running" -ForegroundColor Yellow
         Write-Host "   Please start Ollama or run:" -ForegroundColor Yellow
-        Write-Host "   ollama pull qwen3:8b" -ForegroundColor Yellow
+        Write-Host "   ollama pull qwen2.5:3b" -ForegroundColor Yellow
         Write-Host "   ollama pull nomic-embed-text" -ForegroundColor Yellow
     }
 } else {
     Write-Host "⚠️  Ollama not found in PATH" -ForegroundColor Yellow
     Write-Host "   Please install Ollama and pull required models:" -ForegroundColor Yellow
-    Write-Host "   - ollama pull qwen3:8b" -ForegroundColor Yellow
+    Write-Host "   - ollama pull qwen2.5:3b" -ForegroundColor Yellow
     Write-Host "   - ollama pull nomic-embed-text" -ForegroundColor Yellow
 }
 
@@ -142,11 +142,23 @@ if (-not (Test-Path ".env.example")) {
     @"
 # Ollama Configuration
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:8b
+OLLAMA_MODEL=qwen2.5:3b
+OLLAMA_FORCE_JSON=1
+OLLAMA_KEEP_ALIVE=30m
+OLLAMA_MAX_CONCURRENCY=1
+OLLAMA_NUM_PREDICT=512
+OLLAMA_TIMEOUT=300
 
 # Data Directories
 JME_DATA_DIR=./data
 JME_CACHE_DIR=./.cache
+
+# Schema Limits (for performance)
+JME_MAX_TABLES=12
+JME_MAX_COLS=25
+
+# PDF Context (set to 1 to disable PDF/wiki context search)
+JME_DISABLE_PDF_CONTEXT=0
 
 # CORS (for Superset integration)
 CORS_ORIGINS=*
@@ -192,7 +204,7 @@ if (Test-Path ".env") {
 
 # Default values
 $OLLAMA_URL = if ($env:OLLAMA_URL) { $env:OLLAMA_URL } else { "http://localhost:11434" }
-$OLLAMA_MODEL = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { "qwen3:8b" }
+$OLLAMA_MODEL = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { "qwen2.5:3b" }
 $PORT = if ($env:PORT) { $env:PORT } else { "8010" }
 
 Write-Host "🚀 Starting JME AI Finance Pipeline API..." -ForegroundColor Cyan
@@ -225,7 +237,7 @@ Write-Host "3. Make sure Ollama is running:" -ForegroundColor Yellow
 Write-Host "   # Ollama should start automatically, or run: ollama serve" -ForegroundColor White
 Write-Host ""
 Write-Host "4. Pull required models (if not done during installation):" -ForegroundColor Yellow
-Write-Host "   ollama pull qwen3:8b" -ForegroundColor White
+Write-Host "   ollama pull qwen2.5:3b" -ForegroundColor White
 Write-Host "   ollama pull nomic-embed-text" -ForegroundColor White
 Write-Host ""
 Write-Host "5. Place your Excel/PDF files in the data\ directory" -ForegroundColor Yellow

@@ -1,7 +1,11 @@
 import json
+import os
 import re
+import threading
 import urllib.request
 from typing import Any, Dict, List, Optional
+
+_OLLAMA_SEM = threading.Semaphore(int(os.getenv("OLLAMA_MAX_CONCURRENCY", "1")))
 
 def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.0, timeout_sec: int = 300, num_predict: int = 512) -> str:
     """
@@ -18,54 +22,73 @@ def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], te
                     For SQL generation, 512-1024 is usually enough for small models.
     """
     url = base_url.rstrip("/") + "/api/chat"
-    # Limit token generation to speed up response (SQL queries are usually short)
-    payload = {
-        "model": model, 
-        "messages": messages, 
-        "stream": False, 
+
+    payload_base = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
         "options": {
             "temperature": temperature,
-            "num_predict": num_predict  # Limit generation to prevent long waits
+            "num_predict": num_predict,
         }
     }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as r:
-            response_data = r.read().decode("utf-8")
-            out = json.loads(response_data)
-            # Handle empty or missing content
-            message_content = out.get("message", {}).get("content", "")
-            if not message_content:
-                # Check if there's an error in the response
-                if "error" in out:
-                    raise Exception(f"Ollama API error: {out['error']}")
-                
-                # Check if response was cut off (done: false means incomplete)
-                done_reason = out.get("done_reason", "")
-                if out.get("done") is False:
-                    raise Exception(f"Ollama response incomplete (done_reason: {done_reason or 'unknown'})")
-                
-                # Check done_reason for clues
-                if done_reason:
-                    if done_reason == "stop":
-                        # Model stopped naturally but content is empty - unusual
-                        raise Exception(f"Ollama stopped but returned empty content (done_reason: {done_reason})")
-                    elif done_reason == "length":
-                        raise Exception(f"Ollama hit token limit (num_predict={num_predict}) before generating content. Set OLLAMA_NUM_PREDICT environment variable to increase (e.g., export OLLAMA_NUM_PREDICT=4096)")
-                    else:
-                        raise Exception(f"Ollama returned empty content (done_reason: {done_reason})")
-                
-                raise Exception("Ollama returned empty response content (no done_reason provided)")
-            
-            return message_content
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8") if e.fp else ""
-        raise Exception(f"HTTP error {e.code}: {error_body}")
-    except urllib.error.URLError as e:
-        raise Exception(f"Connection error: {e.reason}")
-    except json.JSONDecodeError as e:
-        raise Exception(f"Invalid JSON response from Ollama: {e}")
+
+    # Optional features (newer Ollama supports these)
+    want_json = os.getenv("OLLAMA_FORCE_JSON", "1").lower() in ("1", "true", "yes")
+    keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+
+    attempts = []
+    p1 = dict(payload_base)
+    if want_json:
+        p1["format"] = "json"
+    if keep_alive:
+        p1["keep_alive"] = keep_alive
+    attempts.append(p1)
+
+    # fallback attempt (no optional fields)
+    attempts.append(payload_base)
+
+    last_err = None
+
+    with _OLLAMA_SEM:
+        for payload in attempts:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_sec) as r:
+                    response_data = r.read().decode("utf-8")
+                    out = json.loads(response_data)
+                    message_content = out.get("message", {}).get("content", "")
+                    if not message_content:
+                        if "error" in out:
+                            raise Exception(f"Ollama API error: {out['error']}")
+                        
+                        # Check if response was cut off (done: false means incomplete)
+                        done_reason = out.get("done_reason", "")
+                        if out.get("done") is False:
+                            raise Exception(f"Ollama response incomplete (done_reason: {done_reason or 'unknown'})")
+                        
+                        # Check done_reason for clues
+                        if done_reason:
+                            if done_reason == "stop":
+                                raise Exception(f"Ollama stopped but returned empty content (done_reason: {done_reason})")
+                            elif done_reason == "length":
+                                raise Exception(f"Ollama hit token limit (num_predict={num_predict}) before generating content. Set OLLAMA_NUM_PREDICT environment variable to increase (e.g., export OLLAMA_NUM_PREDICT=4096)")
+                            else:
+                                raise Exception(f"Ollama returned empty content (done_reason: {done_reason})")
+                        
+                        raise Exception("Ollama returned empty response content (no done_reason provided)")
+                    
+                    return message_content
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode("utf-8") if e.fp else ""
+                last_err = Exception(f"HTTP error {e.code}: {error_body}")
+                continue
+            except Exception as e:
+                last_err = e
+                continue
+
+    raise Exception(str(last_err) if last_err else "Ollama call failed")
 
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
     """

@@ -16,6 +16,7 @@ from .db_store import connect, upsert_mapping, find_mapping, append_rows, upsert
 from .schema_agent import summarize_schema, infer_sheet_mapping
 from .vector_db import store_pdf_embeddings, store_wiki_embeddings
 from .wiki_extractor import extract_wiki_from_url
+from .utils_columns import normalize_columns
 
 def parse_num(x) -> Optional[float]:
     if x is None:
@@ -52,6 +53,7 @@ def read_sheet(xf: Path, sheet: str) -> pd.DataFrame:
     hdr = detect_header_row(xf, sheet)
     df = pd.read_excel(str(xf), sheet_name=sheet, header=hdr, engine="openpyxl")
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    df = normalize_columns(df)  # ✅ normalize here
     return df
 
 def extract_pdf_tables(pdf_path: Path) -> List[Dict[str, Any]]:
@@ -71,9 +73,8 @@ def extract_pdf_tables(pdf_path: Path) -> List[Dict[str, Any]]:
                     if table and len(table) > 1:  # At least header + 1 row
                         # Convert to DataFrame
                         df = pd.DataFrame(table[1:], columns=table[0] if table[0] else None)
-                        # Clean up column names
-                        df.columns = [str(c).strip() if c else f"col_{i}" for i, c in enumerate(df.columns)]
                         df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+                        df = normalize_columns(df)  # ✅ normalize here too
                         if df.shape[0] > 0 and df.shape[1] > 0:
                             tables.append({
                                 "page": page_num,
@@ -106,6 +107,7 @@ def materialize_raw_sheet(con, *, file: str, sheet: str, df: pd.DataFrame) -> st
     Create/replace a raw DuckDB table for the sheet so it can be queried later via /ask.
     Table name is deterministic per (file, sheet) so re-ingests overwrite the same table.
     """
+    df = normalize_columns(df)  # ✅ enforce before writing to DuckDB
     base = f"raw__{_safe_ident(Path(file).stem)}__{_safe_ident(sheet)}__{_short_hash(file + '|' + sheet)}"
     # Quote identifier to be safe even if it contains odd characters (shouldn't after _safe_ident).
     con.register("df_tmp", df)

@@ -94,7 +94,7 @@ if command -v ollama &> /dev/null; then
         echo -e "${GREEN}✓ Ollama is running${NC}"
         
         # Check for LLM model
-        LLM_MODEL="${OLLAMA_MODEL:-qwen3:8b}"
+        LLM_MODEL="${OLLAMA_MODEL:-qwen2.5:3b}"
         echo "   Checking for LLM model: $LLM_MODEL"
         if ollama list | grep -q "$LLM_MODEL"; then
             echo -e "${GREEN}✓ LLM model '$LLM_MODEL' found${NC}"
@@ -125,13 +125,13 @@ if command -v ollama &> /dev/null; then
     else
         echo -e "${YELLOW}⚠️  Ollama is not running${NC}"
         echo "   Please start Ollama: ollama serve"
-        echo "   Or run: ollama pull qwen3:8b"
+        echo "   Or run: ollama pull qwen2.5:3b"
         echo "   And: ollama pull nomic-embed-text"
     fi
 else
     echo -e "${YELLOW}⚠️  Ollama not found in PATH${NC}"
     echo "   Please install Ollama and pull required models:"
-    echo "   - ollama pull qwen3:8b"
+    echo "   - ollama pull qwen2.5:3b"
     echo "   - ollama pull nomic-embed-text"
 fi
 
@@ -142,11 +142,23 @@ if [ ! -f ".env.example" ]; then
     cat > .env.example << 'EOF'
 # Ollama Configuration
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:8b
+OLLAMA_MODEL=qwen2.5:3b
+OLLAMA_FORCE_JSON=1
+OLLAMA_KEEP_ALIVE=30m
+OLLAMA_MAX_CONCURRENCY=1
+OLLAMA_NUM_PREDICT=512
+OLLAMA_TIMEOUT=300
 
 # Data Directories
 JME_DATA_DIR=./data
 JME_CACHE_DIR=./.cache
+
+# Schema Limits (for performance)
+JME_MAX_TABLES=12
+JME_MAX_COLS=25
+
+# PDF Context (set to 1 to disable PDF/wiki context search)
+JME_DISABLE_PDF_CONTEXT=0
 
 # CORS (for Superset integration)
 CORS_ORIGINS=*
@@ -185,7 +197,7 @@ fi
 
 # Default values
 OLLAMA_URL=${OLLAMA_URL:-http://localhost:11434}
-OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:8b}
+OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
 PORT=${PORT:-8010}
 
 echo "🚀 Starting JME AI Finance Pipeline API..."
@@ -219,7 +231,7 @@ echo "3. Make sure Ollama is running:"
 echo "   ollama serve"
 echo ""
 echo "4. Pull required models (if not done during installation):"
-echo "   ollama pull qwen3:8b"
+echo "   ollama pull qwen2.5:3b"
 echo "   ollama pull nomic-embed-text"
 echo ""
 echo "5. Place your Excel/PDF files in the data/ directory"
@@ -237,5 +249,11 @@ echo "  - VECTOR_DB_README.md"
 echo "  - WIKI_INGESTION_README.md"
 echo ""
 
-export OLLAMA_MODEL=qwen3:4b  # Smaller, faster model
-#export JME_DISABLE_PDF_CONTEXT=1  # Skip PDF context
+# Recommended environment variables for CPU-friendly performance:
+# export OLLAMA_MODEL=qwen2.5:3b
+# export OLLAMA_FORCE_JSON=1
+# export OLLAMA_KEEP_ALIVE=30m
+# export OLLAMA_MAX_CONCURRENCY=1
+# export JME_MAX_TABLES=12
+# export JME_MAX_COLS=25
+# export JME_DISABLE_PDF_CONTEXT=1  # Optional: Skip PDF context for faster queries
