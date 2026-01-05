@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from .db_store import connect
 from .planner_agent import plan_sql, get_schema
+from .utils_df import df_to_records_safe
 
 
 DATA_DIR = Path(os.environ.get("JME_DATA_DIR", "./data"))
@@ -34,33 +35,6 @@ app = FastAPI(title="JME AI Finance Pipeline - Chart Data API")
 _DB_MTIME_CACHE: float | None = None
 _TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}
 _PLAN_CACHE: dict[tuple[str, str], dict[str, str]] = {}
-
-
-def df_to_records_safe(df: pd.DataFrame):
-    """Convert DataFrame to records, replacing NaN/Inf with None for JSON serialization."""
-    # Make a copy to avoid modifying original
-    df = df.copy()
-    # Replace +/-inf with NaN first
-    df = df.replace([np.inf, -np.inf], np.nan)
-    # Replace all NaN values with None (more robust than where/notnull)
-    df = df.fillna(value=None)
-    # Convert to dict - any remaining NaN will be caught by explicit None replacement
-    records = df.to_dict(orient="records")
-    # Final pass: recursively replace any remaining NaN/Inf in nested structures
-    def clean_value(v):
-        # Check for NaN/Inf in float or numpy numeric types
-        try:
-            if isinstance(v, (float, np.floating, np.number)):
-                if np.isnan(v) or np.isinf(v):
-                    return None
-        except (TypeError, ValueError):
-            pass  # Not a numeric type, continue
-        if isinstance(v, dict):
-            return {k: clean_value(val) for k, val in v.items()}
-        elif isinstance(v, (list, tuple)):
-            return [clean_value(item) for item in v]
-        return v
-    return [clean_value(r) for r in records]
 
 def _maybe_invalidate_schema_cache() -> None:
     global _DB_MTIME_CACHE, _TABLE_INFO_CACHE, _PLAN_CACHE

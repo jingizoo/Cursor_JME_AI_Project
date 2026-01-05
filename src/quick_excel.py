@@ -18,6 +18,7 @@ except ImportError:
     PDF_AVAILABLE = False
 
 from .llm_client import ollama_chat, extract_json
+from .utils_df import df_to_records_safe
 from .utils_columns import normalize_columns
 
 SAFE_SQL_DENY = ["insert", "update", "delete", "drop", "alter", "create", "attach", "detach", "copy", "pragma", "call"]
@@ -285,26 +286,7 @@ def quick_excel_query(
             "debug": plan.get("raw"),
         }
 
-    # Replace +/-inf with NaN, then convert NaN to None for JSON serialization
-    df = df.copy()
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.fillna(value=None)
-    records = df.to_dict(orient="records")
-    # Final pass: recursively replace any remaining NaN/Inf
-    def clean_value(v):
-        # Check for NaN/Inf in float or numpy numeric types
-        try:
-            if isinstance(v, (float, np.floating, np.number)):
-                if np.isnan(v) or np.isinf(v):
-                    return None
-        except (TypeError, ValueError):
-            pass  # Not a numeric type, continue
-        if isinstance(v, dict):
-            return {k: clean_value(val) for k, val in v.items()}
-        elif isinstance(v, (list, tuple)):
-            return [clean_value(item) for item in v]
-        return v
-    rows = [clean_value(r) for r in records]
+    rows = df_to_records_safe(df)
 
     return {
         "ok": True,
