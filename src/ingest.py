@@ -95,6 +95,65 @@ def materialize_raw_sheet(con, *, file: str, sheet: str, df: pd.DataFrame) -> st
     con.unregister("df_tmp")
     return base
 
+def _refresh_utilisation_view(con) -> None:
+    """
+    Create/refresh a consolidated view for utilisation matrices:
+    - Finds all tables whose names contain 'utilisation_matrix'
+    - Requires columns: project_key and duration (or hours)
+    - Builds a UNION ALL view utilisation_matrix_all with consistent columns:
+        (source_table, project_key, duration DOUBLE)
+    This makes NL→SQL for "total hours across all sources" trivial and reliable.
+    """
+    try:
+        tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    except Exception:
+        return
+
+    candidates: list[tuple[str, str]] = []  # (table_name, duration_column)
+    for t in tables:
+        if "utilisation_matrix" not in (t or "").lower():
+            continue
+        try:
+            cols = con.execute(f"PRAGMA table_info('{t}')").fetchall()
+        except Exception:
+            continue
+        names = [c[1] for c in cols]
+        lower = [str(c or "").lower() for c in names]
+        if "project_key" not in lower:
+            continue
+        dur_col = None
+        if "duration" in lower:
+            dur_col = names[lower.index("duration")]
+        elif "hours" in lower:
+            dur_col = names[lower.index("hours")]
+        if not dur_col:
+            continue
+        candidates.append((t, dur_col))
+
+    if not candidates:
+        return
+
+    parts = []
+    for t, dur_col in candidates:
+        # Quote identifiers safely
+        t_quoted = f'"{t}"'
+        dur_quoted = f'"{dur_col}"'
+        parts.append(
+            "SELECT "
+            f"'{t}' AS source_table, "
+            "project_key, "
+            f"TRY_CAST(NULLIF(REPLACE(TRIM({dur_quoted}), ',', ''), '') AS DOUBLE) AS duration "
+            f"FROM {t_quoted}"
+        )
+
+    union_sql = "\nUNION ALL\n".join(parts)
+    view_sql = "CREATE OR REPLACE VIEW utilisation_matrix_all AS\n" + union_sql
+    try:
+        con.execute(view_sql)
+        print(f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} utilisation_matrix table(s).")
+    except Exception as e:
+        print(f"Warning: failed to refresh utilisation_matrix_all view: {e}")
+
 def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None, exclude_files: Optional[List[str]] = None):
     con = connect(db_path)
     ingested = 0
@@ -282,6 +341,12 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                 else:
                     errors.append({"file": f"wiki:{wiki_url}", "error": vec_result.get("error", "Failed to store embeddings")})
             except Exception as e:
-                errors.append({"file": f"wiki:{wiki_url}", "error": f"Failed to process wiki: {e}"})
+                    errors.append({"file": f"wiki:{wiki_url}", "error": f"Failed to process wiki: {e}"})
+
+    # Refresh consolidated utilisation view (if relevant tables exist)
+    try:
+        _refresh_utilisation_view(con)
+    except Exception as e:
+        errors.append({"file": "system", "error": f"Failed to refresh utilisation_matrix_all view: {e}"})
 
     return {"ok": True, "ingested_sheets": ingested, "wiki_pages": wiki_ingested, "skipped": skipped, "errors": errors}
