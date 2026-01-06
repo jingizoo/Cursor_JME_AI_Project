@@ -337,7 +337,7 @@ def health():
 def ingest(req: IngestReq):
     if not DATA_DIR.exists():
         return {"ok": False, "error": f"DATA_DIR not found: {DATA_DIR.resolve()}"}
-    return ingest_folder(
+    result = ingest_folder(
         data_dir=DATA_DIR,
         db_path=DB_PATH,
         base_url=OLLAMA_URL,
@@ -347,6 +347,18 @@ def ingest(req: IngestReq):
         wiki_api_key=req.wiki_api_key,
         exclude_files=req.exclude_files
     )
+    # Also check if view was created
+    con = connect(DB_PATH, read_only=True)
+    try:
+        views = [t[0] for t in con.execute("SHOW TABLES").fetchall() if "utilisation_matrix_all" in (t[0] or "").lower()]
+        result["utilisation_view_exists"] = len(views) > 0
+        if views:
+            result["utilisation_view_name"] = views[0]
+    except Exception:
+        pass
+    finally:
+        con.close()
+    return result
 
 @app.get("/catalog")
 def catalog():
