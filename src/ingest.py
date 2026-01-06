@@ -98,8 +98,9 @@ def materialize_raw_sheet(con, *, file: str, sheet: str, df: pd.DataFrame) -> st
 def _refresh_utilisation_view(con) -> None:
     """
     Create/refresh a consolidated view for utilisation matrices:
-    - Finds all tables whose names contain 'utilisation_matrix'
-    - Requires columns: project_key and duration (or hours)
+    - Finds all tables that look like utilisation matrices based on their columns
+      (no longer requires a specific name pattern).
+    - Requires columns: a project-key-like column and a duration/hours-like column
     - Builds a UNION ALL view utilisation_matrix_all with consistent columns:
         (source_table, project_key, duration DOUBLE)
     This makes NL→SQL for "total hours across all sources" trivial and reliable.
@@ -109,39 +110,49 @@ def _refresh_utilisation_view(con) -> None:
     except Exception:
         return
 
-    candidates: list[tuple[str, str]] = []  # (table_name, duration_column)
+    candidates: list[tuple[str, str, str]] = []  # (table_name, project_key_column, duration_column)
     for t in tables:
-        if "utilisation_matrix" not in (t or "").lower():
-            continue
         try:
             cols = con.execute(f"PRAGMA table_info('{t}')").fetchall()
         except Exception:
             continue
         names = [c[1] for c in cols]
         lower = [str(c or "").lower() for c in names]
-        if "project_key" not in lower:
+        # Find a project key–like column
+        proj_col = None
+        for name, low in zip(names, lower):
+            if "project" in low and "key" in low:
+                proj_col = name
+                break
+        if not proj_col and "project_key" in lower:
+            proj_col = names[lower.index("project_key")]
+        if not proj_col:
             continue
+
+        # Find a duration/hours–like column
         dur_col = None
-        if "duration" in lower:
-            dur_col = names[lower.index("duration")]
-        elif "hours" in lower:
-            dur_col = names[lower.index("hours")]
+        for name, low in zip(names, lower):
+            if "duration" in low or "hours" in low or "hrs" in low:
+                dur_col = name
+                break
         if not dur_col:
             continue
-        candidates.append((t, dur_col))
+
+        candidates.append((t, proj_col, dur_col))
 
     if not candidates:
         return
 
     parts = []
-    for t, dur_col in candidates:
+    for t, proj_col, dur_col in candidates:
         # Quote identifiers safely
         t_quoted = f'"{t}"'
+        proj_quoted = f'"{proj_col}"'
         dur_quoted = f'"{dur_col}"'
         parts.append(
             "SELECT "
             f"'{t}' AS source_table, "
-            "project_key, "
+            f"{proj_quoted} AS project_key, "
             f"TRY_CAST(NULLIF(REPLACE(TRIM({dur_quoted}), ',', ''), '') AS DOUBLE) AS duration "
             f"FROM {t_quoted}"
         )
