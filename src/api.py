@@ -162,6 +162,8 @@ def _tables_preview(con, max_tables: int = 30) -> List[str]:
         return []
 
 _COL_RE = re.compile(r"^col_\d+$", re.IGNORECASE)
+_AMBIG_COL_RE = re.compile(r'Ambiguous reference to column name "([^"]+)"', re.IGNORECASE)
+_AMBIG_USE_RE = re.compile(r'use:\s*"([^"]+)"\s*or\s*"([^"]+)"', re.IGNORECASE)
 
 def _repair_missing_col(sql: str, err: str) -> str | None:
     """
@@ -200,6 +202,67 @@ def _repair_missing_col(sql: str, err: str) -> str | None:
     sql2 = re.sub(rf"\b{re.escape(missing)}\b", replacement, sql2)
 
     return sql2 if sql2 != sql else None
+
+def _repair_ambiguous_col(sql: str, err: str) -> str | None:
+    """
+    If DuckDB reports ambiguous reference to a column (e.g. area) due to joins,
+    rewrite unqualified references to a safe COALESCE(t1.col, t2.col).
+    """
+    if not sql or not err:
+        return None
+
+    m = _AMBIG_COL_RE.search(err)
+    if not m:
+        return None
+    col = m.group(1)
+
+    u = _AMBIG_USE_RE.search(err)
+    if not u:
+        return None
+
+    a1, a2 = u.group(1), u.group(2)
+    if "." not in a1 or "." not in a2:
+        return None
+
+    alias1, c1 = a1.split(".", 1)
+    alias2, c2 = a2.split(".", 1)
+    alias1 = alias1.strip().strip('"').strip("`")
+    alias2 = alias2.strip().strip('"').strip("`")
+    c1 = c1.strip().strip('"').strip("`")
+    c2 = c2.strip().strip('"').strip("`")
+    if c1.lower() != col.lower() or c2.lower() != col.lower():
+        return None
+
+    s = (sql or "").strip().rstrip(";").strip()
+    mfrom = re.search(r"\bfrom\b", s, flags=re.IGNORECASE)
+    if not mfrom:
+        return None
+    select_part = s[: mfrom.start()]
+    rest = s[mfrom.start() :]
+
+    expr = f"COALESCE({alias1}.{col}, {alias2}.{col})"
+
+    def _replace_first_in_select(text: str) -> str:
+        # Prefer quoted forms first
+        for pat in (rf"`{re.escape(col)}`", rf"\"{re.escape(col)}\""):
+            if re.search(pat, text):
+                return re.sub(pat, f"{expr} AS {col}", text, count=1)
+        # Bare identifier, not qualified with dot
+        pat = rf"(?<!\.)\b{re.escape(col)}\b"
+        return re.sub(pat, f"{expr} AS {col}", text, count=1)
+
+    select_part2 = _replace_first_in_select(select_part)
+
+    def _replace_unqualified(text: str) -> str:
+        # Replace only unqualified references; keep t1.col / t2.col as-is.
+        for pat in (rf"`{re.escape(col)}`", rf"\"{re.escape(col)}\""):
+            text = re.sub(pat, expr, text)
+        text = re.sub(rf"(?<!\.)\b{re.escape(col)}\b", expr, text)
+        return text
+
+    rest2 = _replace_unqualified(rest)
+    sql2 = (select_part2 + rest2).strip()
+    return sql2 if sql2 != s else None
 
 def _build_no_answer_hint(*, con, question: str, sql: str = "", error: str = "", empty: bool = False) -> str:
     tables = _tables_preview(con)
@@ -396,6 +459,28 @@ def ask(req: AskReq):
         except Exception as e:
             err = f"{e}"
             timings["sql_exec_ms"] = round((time.time() - t2) * 1000, 2)
+
+            # ✅ Auto-repair ambiguous column references (e.g., area vs t1.area/t2.area)
+            repaired_sql = _repair_ambiguous_col(sql, err)
+            if repaired_sql:
+                try:
+                    df = con.execute(repaired_sql).df()
+                    timings["sql_exec_ms"] = round((time.time() - t2) * 1000, 2)
+                    rows = df_to_records_safe(df) if df is not None and df.shape[0] else []
+                    _PLAN_CACHE[cache_key] = {"sql": repaired_sql, "notes": plan.get("notes", "")}
+                    return {
+                        "ok": True,
+                        "sql": repaired_sql,
+                        "rows": rows,
+                        "notes": plan.get("notes", ""),
+                        "model": OLLAMA_MODEL,
+                        "timings_ms": timings,
+                        "total_ms": round((time.time() - start_time) * 1000, 2),
+                        "repaired": True,
+                        "repair_reason": "duckdb_binder_ambiguous_col",
+                    }
+                except Exception:
+                    pass  # fall through to other repairs / normal error response
 
             # ✅ Auto-repair missing column errors (simple SQL rewrite, no LLM retry)
             repaired_sql = _repair_missing_col(sql, err)

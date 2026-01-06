@@ -23,6 +23,61 @@ def ensure_limit(sql: str, limit: int = 200) -> str:
         return s
     return f"{s}\nLIMIT {int(limit)}"
 
+_ALL_SOURCES_PAT = re.compile(r"\b(across\s+all|all\s+(data\s+)?sources|all\s+files|all\s+excels|all\s+sheets|combine\s+all)\b", re.IGNORECASE)
+
+def _wants_all_sources(question: str) -> bool:
+    return bool(_ALL_SOURCES_PAT.search(question or ""))
+
+def _build_all_sources_cte(schema: Dict[str, Any]) -> tuple[str, list[str]] | None:
+    """
+    Build a safe UNION ALL CTE across all tables in schema.tables with aligned columns.
+    Uses intersection of columns to avoid UNION column-count/type mismatches.
+    Returns (cte_sql, cols_used) or None.
+    """
+    tables = schema.get("tables") if isinstance(schema, dict) else None
+    if not isinstance(tables, dict) or len(tables) < 2:
+        return None
+
+    table_names = [t for t in tables.keys() if isinstance(t, str)]
+    if len(table_names) < 2:
+        return None
+
+    cols_lists: list[list[str]] = []
+    for t in table_names:
+        cols = tables.get(t)
+        if isinstance(cols, list) and all(isinstance(c, str) for c in cols):
+            cols_lists.append(cols)
+        else:
+            cols_lists.append([])
+
+    # Prefer common columns across all tables (prevents UNION mismatch)
+    common = set(cols_lists[0]) if cols_lists and cols_lists[0] else set()
+    for cols in cols_lists[1:]:
+        common &= set(cols)
+
+    base_cols = cols_lists[0] if cols_lists else []
+    cols_used = [c for c in base_cols if c in common]
+
+    # If there is no intersection, we cannot build a safe UNION across all tables.
+    if not cols_used:
+        return None
+
+    max_cols = int(os.getenv("JME_ALL_SOURCES_MAX_COLS", "20"))
+    if max_cols > 0:
+        cols_used = cols_used[:max_cols]
+
+    if not cols_used:
+        return None
+
+    parts: list[str] = []
+    for t in table_names:
+        select_cols = ", ".join(cols_used)
+        parts.append(f"SELECT '{t}' AS __source_table, {select_cols} FROM {t}")
+
+    union_sql = "\nUNION ALL\n".join(parts)
+    cte = f"WITH all_sources AS (\n{union_sql}\n)\n"
+    return cte, cols_used
+
 def get_schema(con: duckdb.DuckDBPyConnection) -> Dict[str, Any]:
     tables = {}
     for (t,) in con.execute("SHOW TABLES").fetchall():
@@ -96,6 +151,23 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     ]
     
     system = "".join(system_parts)
+
+    # If user asks "across all sources/files", provide a correct UNION ALL CTE so the model doesn't hallucinate unions.
+    all_sources_cte = None
+    if _wants_all_sources(question):
+        built = _build_all_sources_cte(schema)
+        if built:
+            all_sources_cte, cols_used = built
+            system += (
+                "\nMULTI-SOURCE MODE:\n"
+                "- The user asked to aggregate across ALL available tables/files.\n"
+                "- DO NOT write your own UNION or JOIN between source tables.\n"
+                "- You MUST query only from `all_sources` (the provided CTE).\n"
+                "- Do NOT reference the original table names in SQL.\n"
+                f"- Columns available in all_sources: {cols_used}\n"
+                "\nProvided CTE (must include at top of your SQL):\n"
+                + all_sources_cte
+            )
     
     if pdf_context:
         # Keep PDF context brief to reduce prompt size
@@ -106,6 +178,8 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     # Build user message with schema and question
     # Keep it compact - only essential info
     user_data = {"schema": schema, "question": question}
+    if all_sources_cte:
+        user_data["all_sources_cte"] = all_sources_cte
     if pdf_context:
         # Limit PDF context in user message too
         user_data["pdf_context"] = [{"text": c.get("text", "")[:100]} for c in pdf_context[:2]]  # Reduced size
