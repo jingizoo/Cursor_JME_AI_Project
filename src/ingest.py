@@ -118,10 +118,10 @@ def _refresh_utilisation_view(con) -> None:
             continue
         names = [c[1] for c in cols]
         lower = [str(c or "").lower() for c in names]
-        # Find a project key–like column
+        # Find a project key–like column (very tolerant: any col containing 'project' or 'proj')
         proj_col = None
         for name, low in zip(names, lower):
-            if "project" in low and "key" in low:
+            if "project" in low or "proj" in low:
                 proj_col = name
                 break
         if not proj_col and "project_key" in lower:
@@ -141,6 +141,7 @@ def _refresh_utilisation_view(con) -> None:
         candidates.append((t, proj_col, dur_col))
 
     if not candidates:
+        print("ℹ️ _refresh_utilisation_view: no candidate utilisation tables found.")
         return
 
     parts = []
@@ -161,7 +162,7 @@ def _refresh_utilisation_view(con) -> None:
     view_sql = "CREATE OR REPLACE VIEW utilisation_matrix_all AS\n" + union_sql
     try:
         con.execute(view_sql)
-        print(f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} utilisation_matrix table(s).")
+        print(f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} utilisation-like table(s).")
     except Exception as e:
         print(f"Warning: failed to refresh utilisation_matrix_all view: {e}")
 
