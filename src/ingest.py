@@ -113,7 +113,7 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to list tables: {e}"
 
-    candidates: list[tuple[str, str, str]] = []  # (table_name, project_key_column, duration_column)
+    candidates: list[tuple[str, str, str, str]] = []  # (table_name, project_key_column, duration_column, duration_type)
     for t in tables:
         # Skip registry tables
         if t in ("schema_registry", "raw_sheet_registry"):
@@ -123,6 +123,7 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
         except Exception as e:
             continue
         names = [c[1] for c in cols]
+        types = [str(c[2] or "").lower() for c in cols]
         lower = [str(c or "").lower() for c in names]
         
         # Find a project key–like column (very tolerant: any col containing 'project' or 'proj')
@@ -139,19 +140,25 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
 
         # Find a duration/hours–like column (exact match first, then substring)
         dur_col = None
+        dur_type = ""
         if "hours" in lower:
-            dur_col = names[lower.index("hours")]
+            idx = lower.index("hours")
+            dur_col = names[idx]
+            dur_type = types[idx]
         elif "duration" in lower:
-            dur_col = names[lower.index("duration")]
+            idx = lower.index("duration")
+            dur_col = names[idx]
+            dur_type = types[idx]
         else:
-            for name, low in zip(names, lower):
+            for name, low, t in zip(names, lower, types):
                 if "duration" in low or "hours" in low or "hrs" in low:
                     dur_col = name
+                    dur_type = t
                     break
         if not dur_col:
             continue
 
-        candidates.append((t, proj_col, dur_col))
+        candidates.append((t, proj_col, dur_col, dur_type))
 
     if not candidates:
         msg = f"ℹ️  _refresh_utilisation_view: no candidate utilisation tables found (scanned {len(tables)} tables, need project_key + hours/duration columns)."
@@ -159,16 +166,22 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
         return False, msg
 
     parts = []
-    for t, proj_col, dur_col in candidates:
+    for t, proj_col, dur_col, dur_type in candidates:
         # Quote identifiers safely
         t_quoted = f'"{t}"'
         proj_quoted = f'"{proj_col}"'
         dur_quoted = f'"{dur_col}"'
+        # If the hours/duration column is already numeric, avoid string TRIM/REPLACE
+        if any(x in dur_type for x in ["double", "decimal", "int", "numeric"]):
+            expr = f"TRY_CAST({dur_quoted} AS DOUBLE)"
+        else:
+            expr = f"TRY_CAST(NULLIF(REPLACE(TRIM({dur_quoted}), ',', ''), '') AS DOUBLE)"
+
         parts.append(
             "SELECT "
             f"'{t}' AS source_table, "
             f"{proj_quoted} AS project_key, "
-            f"TRY_CAST(NULLIF(REPLACE(TRIM({dur_quoted}), ',', ''), '') AS DOUBLE) AS duration "
+            f"{expr} AS duration "
             f"FROM {t_quoted}"
         )
 
