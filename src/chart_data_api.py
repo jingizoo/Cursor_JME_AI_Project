@@ -184,6 +184,14 @@ def ask_data(req: AskDataReq):
             plan = {"ok": True, "sql": sql, "notes": cached.get("notes", "")}
         else:
             plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
+            # If token/length limit, retry once with smaller schema (faster than raising num_predict on CPU)
+            if not plan.get("ok"):
+                err_txt = str(plan.get("error", "")).lower()
+                if ("token" in err_txt and "limit" in err_txt) or ("num_predict" in err_txt) or ("length" in err_txt):
+                    schema_small = _schema_for_llm(con, req.question, max_tables=6, max_cols_per_table=15)
+                    plan2 = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema_small, question=req.question)
+                    if plan2.get("ok") and plan2.get("sql"):
+                        plan = plan2
             if plan.get("ok") and plan.get("sql"):
                 _PLAN_CACHE[cache_key] = {"sql": plan["sql"], "notes": plan.get("notes", "")}
         if not plan.get("ok"):

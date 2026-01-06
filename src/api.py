@@ -334,6 +334,19 @@ def ask(req: AskReq):
             if plan.get("ok") and plan.get("sql"):
                 # Cache the plan for future identical questions
                 _PLAN_CACHE[cache_key] = {"sql": plan["sql"], "notes": plan.get("notes", "")}
+
+            # If the LLM hit a token/length limit, retry once with a smaller schema (usually faster than increasing num_predict)
+            if not plan.get("ok"):
+                err_txt = str(plan.get("error", "")).lower()
+                if ("token" in err_txt and "limit" in err_txt) or ("num_predict" in err_txt) or ("length" in err_txt):
+                    t_schema2 = time.time()
+                    schema_small = _schema_for_llm(con, req.question, max_tables=6, max_cols_per_table=15)
+                    timings["schema_build_ms_2"] = round((time.time() - t_schema2) * 1000, 2)
+                    plan2 = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema_small, question=req.question)
+                    timings["llm_ms"] = round((time.time() - t1) * 1000, 2)  # total planning time (attempt1 + attempt2)
+                    if plan2.get("ok") and plan2.get("sql"):
+                        plan = plan2
+                        _PLAN_CACHE[cache_key] = {"sql": plan2["sql"], "notes": plan2.get("notes", "")}
             
         if not plan.get("ok"):
             # Provide a hint even when planning fails (often schema mismatch).
