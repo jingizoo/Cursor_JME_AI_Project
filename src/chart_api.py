@@ -34,18 +34,21 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")  # CPU-friendly defa
 
 app = FastAPI(title="JME AI Finance Pipeline - Chart API")
 
-_DB_MTIME_CACHE: float | None = None
-_TABLE_INFO_CACHE: dict[str, list[dict[str, str]]] = {}
+_DB_SIG_CACHE: tuple[int, int] | None = None  # (mtime_ns, size)
+_TABLE_INFO_CACHE: dict[tuple[str, int | None], list[dict[str, str]]] = {}
+_PLAN_CACHE: dict[tuple[str, str, tuple[int, int] | None], dict[str, str]] = {}  # (question, model, db_sig) -> {sql, notes}
 
 def _maybe_invalidate_schema_cache() -> None:
-    global _DB_MTIME_CACHE, _TABLE_INFO_CACHE
+    global _DB_SIG_CACHE, _TABLE_INFO_CACHE, _PLAN_CACHE
     try:
-        mtime = DB_PATH.stat().st_mtime
+        st = DB_PATH.stat()
+        sig = (st.st_mtime_ns, st.st_size)
     except Exception:
-        mtime = None
-    if _DB_MTIME_CACHE != mtime:
-        _DB_MTIME_CACHE = mtime
+        sig = None
+    if _DB_SIG_CACHE != sig:
+        _DB_SIG_CACHE = sig
         _TABLE_INFO_CACHE = {}
+        _PLAN_CACHE = {}
 
 def _get_table_info_cached(con, table: str, max_cols: int = None) -> list[dict[str, str]]:
     _maybe_invalidate_schema_cache()
@@ -348,16 +351,27 @@ def ask_with_chart(req: ChartQuestionReq):
     try:
         # Get schema and plan SQL
         schema = _schema_for_llm(con, req.question)
-        plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
 
-        # If token/length limit, retry once with smaller schema (faster than raising num_predict on CPU)
-        if not plan.get("ok"):
-            err_txt = str(plan.get("error", "")).lower()
-            if ("token" in err_txt and "limit" in err_txt) or ("num_predict" in err_txt) or ("length" in err_txt):
-                schema_small = _schema_for_llm(con, req.question, max_tables=6, max_cols_per_table=15)
-                plan2 = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema_small, question=req.question)
-                if plan2.get("ok") and plan2.get("sql"):
-                    plan = plan2
+        # Plan cache (repeat questions become instant)
+        _maybe_invalidate_schema_cache()
+        cache_key = (req.question.strip(), OLLAMA_MODEL, _DB_SIG_CACHE)
+        cached = _PLAN_CACHE.get(cache_key)
+        if cached and cached.get("sql"):
+            plan = {"ok": True, "sql": cached["sql"], "notes": cached.get("notes", ""), "cached": True}
+        else:
+            plan = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema, question=req.question)
+
+            # If token/length limit, retry once with smaller schema (faster than raising num_predict on CPU)
+            if not plan.get("ok"):
+                err_txt = str(plan.get("error", "")).lower()
+                if ("token" in err_txt and "limit" in err_txt) or ("num_predict" in err_txt) or ("length" in err_txt):
+                    schema_small = _schema_for_llm(con, req.question, max_tables=6, max_cols_per_table=15)
+                    plan2 = plan_sql(base_url=OLLAMA_URL, model=OLLAMA_MODEL, schema=schema_small, question=req.question)
+                    if plan2.get("ok") and plan2.get("sql"):
+                        plan = plan2
+
+            if plan.get("ok") and plan.get("sql"):
+                _PLAN_CACHE[cache_key] = {"sql": plan["sql"], "notes": plan.get("notes", "")}
         
         if not plan.get("ok"):
             plan["hint"] = _build_no_answer_hint(con=con, question=req.question, error=str(plan.get("error", "")))

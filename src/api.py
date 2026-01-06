@@ -289,11 +289,41 @@ def ingest(req: IngestReq):
 def catalog():
     con = connect(DB_PATH, read_only=True)
     try:
-        rows = con.execute("SELECT file, sheet, sheet_type, confidence, notes, updated_ts FROM schema_registry ORDER BY updated_ts DESC").fetchall()
+        # Primary source of truth is raw ingestion (raw_sheet_registry).
+        # schema_registry is optional (LLM-derived notes) and may be disabled for performance.
+        rows = con.execute(
+            """
+            SELECT
+              r.file,
+              r.sheet,
+              r.raw_table,
+              r.n_rows,
+              r.n_cols,
+              r.updated_ts,
+              s.sheet_type,
+              s.confidence,
+              s.notes
+            FROM raw_sheet_registry r
+            LEFT JOIN schema_registry s
+              ON s.file=r.file AND s.sheet=r.sheet AND s.file_size=r.file_size AND s.file_mtime=r.file_mtime
+            ORDER BY r.updated_ts DESC
+            """
+        ).fetchall()
         out = []
         for r in rows:
-            out.append({"file": r[0], "sheet": r[1], "sheet_type": r[2], "confidence": float(r[3] or 0), "notes": r[4] or "", "updated_ts": r[5]})
-        return {"ok": True, "mappings": out}
+            out.append({
+                "file": r[0],
+                "sheet": r[1],
+                "raw_table": r[2],
+                "n_rows": int(r[3] or 0),
+                "n_cols": int(r[4] or 0),
+                "updated_ts": r[5],
+                # LLM-derived (may be null if JME_ENABLE_SHEET_NOTES=0)
+                "sheet_type": r[6] or "unknown",
+                "confidence": float(r[7]) if r[7] is not None else None,
+                "notes": r[8] or "",
+            })
+        return {"ok": True, "items": out}
     finally:
         con.close()
 
