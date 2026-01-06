@@ -95,7 +95,10 @@ def materialize_raw_sheet(con, *, file: str, sheet: str, df: pd.DataFrame) -> st
     con.unregister("df_tmp")
     return base
 
-def _refresh_utilisation_view(con) -> None:
+def _refresh_utilisation_view(con) -> tuple[bool, str]:
+    """
+    Returns: (success: bool, message: str)
+    """
     """
     Create/refresh a consolidated view for utilisation matrices:
     - Finds all tables that look like utilisation matrices based on their columns
@@ -107,8 +110,8 @@ def _refresh_utilisation_view(con) -> None:
     """
     try:
         tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
-    except Exception:
-        return
+    except Exception as e:
+        return False, f"Failed to list tables: {e}"
 
     candidates: list[tuple[str, str, str]] = []  # (table_name, project_key_column, duration_column)
     for t in tables:
@@ -151,8 +154,9 @@ def _refresh_utilisation_view(con) -> None:
         candidates.append((t, proj_col, dur_col))
 
     if not candidates:
-        print(f"ℹ️  _refresh_utilisation_view: no candidate utilisation tables found (scanned {len(tables)} tables, need project_key + hours/duration columns).")
-        return
+        msg = f"ℹ️  _refresh_utilisation_view: no candidate utilisation tables found (scanned {len(tables)} tables, need project_key + hours/duration columns)."
+        print(msg)
+        return False, msg
 
     parts = []
     for t, proj_col, dur_col in candidates:
@@ -172,10 +176,14 @@ def _refresh_utilisation_view(con) -> None:
     view_sql = "CREATE OR REPLACE VIEW utilisation_matrix_all AS\n" + union_sql
     try:
         con.execute(view_sql)
-        print(f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} table(s): {[c[0] for c in candidates]}")
+        msg = f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} table(s): {[c[0] for c in candidates]}"
+        print(msg)
+        return True, msg
     except Exception as e:
-        print(f"⚠️  Warning: failed to refresh utilisation_matrix_all view: {e}")
+        err_msg = f"⚠️  Warning: failed to refresh utilisation_matrix_all view: {e}"
+        print(err_msg)
         print(f"   Attempted SQL (first 500 chars): {view_sql[:500]}")
+        return False, err_msg
 
 def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None, exclude_files: Optional[List[str]] = None):
     con = connect(db_path)
@@ -367,9 +375,8 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                     errors.append({"file": f"wiki:{wiki_url}", "error": f"Failed to process wiki: {e}"})
 
     # Refresh consolidated utilisation view (if relevant tables exist)
-    try:
-        _refresh_utilisation_view(con)
-    except Exception as e:
-        errors.append({"file": "system", "error": f"Failed to refresh utilisation_matrix_all view: {e}"})
+    view_success, view_msg = _refresh_utilisation_view(con)
+    if not view_success:
+        errors.append({"file": "system", "error": f"Failed to refresh utilisation_matrix_all view: {view_msg}"})
 
     return {"ok": True, "ingested_sheets": ingested, "wiki_pages": wiki_ingested, "skipped": skipped, "errors": errors}

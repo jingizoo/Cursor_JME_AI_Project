@@ -347,15 +347,24 @@ def ingest(req: IngestReq):
         wiki_api_key=req.wiki_api_key,
         exclude_files=req.exclude_files
     )
-    # Also check if view was created
+    # Also check if view was created and include debug info
     con = connect(DB_PATH, read_only=True)
     try:
-        views = [t[0] for t in con.execute("SHOW TABLES").fetchall() if "utilisation_matrix_all" in (t[0] or "").lower()]
+        all_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+        views = [t for t in all_tables if "utilisation_matrix_all" in (t or "").lower()]
         result["utilisation_view_exists"] = len(views) > 0
         if views:
             result["utilisation_view_name"] = views[0]
-    except Exception:
-        pass
+        else:
+            # Debug: show which tables were scanned
+            raw_tables = [t for t in all_tables if t.startswith("raw__") and t not in ("schema_registry", "raw_sheet_registry")]
+            result["debug"] = {
+                "total_tables": len(all_tables),
+                "raw_tables_count": len(raw_tables),
+                "raw_tables_sample": raw_tables[:5]  # First 5 for debugging
+            }
+    except Exception as e:
+        result["debug_error"] = str(e)
     finally:
         con.close()
     return result
