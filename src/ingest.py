@@ -165,25 +165,73 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
         print(msg)
         return False, msg
 
+    # Find ALL common columns across all candidate tables (not just project_key + hours)
+    # First, get full column info for each candidate table
+    table_cols: dict[str, dict[str, str]] = {}  # table_name -> {col_name: col_type}
+    for t, _, _, _ in candidates:
+        try:
+            cols = con.execute(f"PRAGMA table_info('{t}')").fetchall()
+            table_cols[t] = {c[1]: str(c[2] or "VARCHAR") for c in cols}
+        except Exception:
+            continue
+    
+    if not table_cols:
+        msg = "⚠️  Failed to read column info from candidate tables."
+        print(msg)
+        return False, msg
+    
+    # Find columns that exist in ALL tables (for safe UNION ALL)
+    all_cols = set()
+    for col_map in table_cols.values():
+        all_cols.update(col_map.keys())
+    
+    common_cols = set(all_cols)
+    for col_map in table_cols.values():
+        common_cols &= set(col_map.keys())
+    
+    if not common_cols:
+        msg = f"⚠️  No common columns found across {len(candidates)} utilisation tables."
+        print(msg)
+        return False, msg
+    
+    # Sort columns for consistent output (project_key first, then hours/duration, then rest alphabetically)
+    sorted_cols = []
+    proj_cols = [c for c in common_cols if "project" in c.lower() or "proj" in c.lower()]
+    dur_cols = [c for c in common_cols if "hour" in c.lower() or "duration" in c.lower() or "hrs" in c.lower()]
+    rest_cols = sorted([c for c in common_cols if c not in proj_cols and c not in dur_cols])
+    sorted_cols = proj_cols + dur_cols + rest_cols
+    
+    # Build SELECT parts with all common columns, handling type mismatches
     parts = []
-    for t, proj_col, dur_col, dur_type in candidates:
-        # Quote identifiers safely
+    for t, _, _, _ in candidates:
         t_quoted = f'"{t}"'
-        proj_quoted = f'"{proj_col}"'
-        dur_quoted = f'"{dur_col}"'
-        # If the hours/duration column is already numeric, avoid string TRIM/REPLACE
-        if any(x in dur_type for x in ["double", "decimal", "int", "numeric"]):
-            expr = f"TRY_CAST({dur_quoted} AS DOUBLE)"
-        else:
-            expr = f"TRY_CAST(NULLIF(REPLACE(TRIM({dur_quoted}), ',', ''), '') AS DOUBLE)"
-
-        parts.append(
-            "SELECT "
-            f"'{t}' AS source_table, "
-            f"{proj_quoted} AS project_key, "
-            f"{expr} AS duration "
-            f"FROM {t_quoted}"
-        )
+        col_map = table_cols.get(t, {})
+        select_parts = [f"'{t}' AS source_table"]
+        
+        for col in sorted_cols:
+            col_quoted = f'"{col}"'
+            col_type = (col_map.get(col) or "VARCHAR").upper()
+            
+            # For numeric types, cast to a common numeric type
+            if any(ntype in col_type for ntype in ("DOUBLE", "DECIMAL", "NUMERIC", "INTEGER", "BIGINT", "INT", "FLOAT", "REAL")):
+                # Use DOUBLE as the common numeric type for UNION compatibility
+                if "DOUBLE" in col_type or "FLOAT" in col_type or "REAL" in col_type:
+                    select_parts.append(f"TRY_CAST({col_quoted} AS DOUBLE) AS {col_quoted}")
+                elif "INT" in col_type or "BIGINT" in col_type:
+                    select_parts.append(f"TRY_CAST({col_quoted} AS DOUBLE) AS {col_quoted}")  # Cast INT to DOUBLE for UNION
+                else:
+                    select_parts.append(f"TRY_CAST({col_quoted} AS DOUBLE) AS {col_quoted}")
+            # For string types, keep as VARCHAR
+            elif any(stype in col_type for stype in ("VARCHAR", "TEXT", "STRING", "CHAR")):
+                select_parts.append(f"CAST({col_quoted} AS VARCHAR) AS {col_quoted}")
+            # For timestamp/date types, keep as-is (DuckDB handles these)
+            elif any(dtype in col_type for dtype in ("TIMESTAMP", "DATE", "TIME")):
+                select_parts.append(f"{col_quoted}")
+            # Default: cast to VARCHAR for safety
+            else:
+                select_parts.append(f"CAST({col_quoted} AS VARCHAR) AS {col_quoted}")
+        
+        parts.append(f"SELECT {', '.join(select_parts)} FROM {t_quoted}")
 
     union_sql = "\nUNION ALL\n".join(parts)
     view_sql = "CREATE OR REPLACE VIEW utilisation_matrix_all AS\n" + union_sql
