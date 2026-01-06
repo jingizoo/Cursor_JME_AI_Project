@@ -215,14 +215,65 @@ def detect_chart_type(question: str, df: pd.DataFrame) -> str:
     
     return 'bar'  # Default
 
-def create_bar_chart(df: pd.DataFrame, title: str = "Chart") -> str:
+def create_bar_chart(df: pd.DataFrame, title: str = "Chart", question: str = "") -> str:
     """Create a bar chart and return as base64 encoded image."""
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Assume first column is x-axis, second is y-axis
     if len(df.columns) >= 2:
-        x_col = df.columns[0]
-        y_col = df.columns[1]
+        # Smart axis detection: find categorical (x-axis) vs numeric (y-axis) columns
+        question_lower = (question or "").lower()
+        
+        # Check question for explicit hints (e.g., "plot users on x axis")
+        x_col_hint = None
+        y_col_hint = None
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if any(word in question_lower for word in ["plot", "show", "display", "x axis", "x-axis"]) and col_lower in question_lower:
+                x_col_hint = col
+            if any(word in question_lower for word in ["y axis", "y-axis", "total", "sum", "count"]) and col_lower in question_lower:
+                y_col_hint = col
+        
+        # Detect column types
+        x_col = None
+        y_col = None
+        
+        # Common patterns for x-axis (categorical) and y-axis (numeric)
+        x_patterns = ['user', 'name', 'category', 'type', 'status', 'area', 'module', 'project']
+        y_patterns = ['total', 'sum', 'count', 'hours', 'duration', 'amount', 'value', 'quantity']
+        
+        for col in df.columns:
+            col_lower = str(col).lower()
+            # Check if column is numeric
+            is_numeric = pd.api.types.is_numeric_dtype(df[col])
+            # Check if column is mostly strings/objects (categorical)
+            is_categorical = df[col].dtype == 'object' or (not is_numeric and df[col].dtype.name in ['string', 'object'])
+            
+            # Prefer hints from question
+            if x_col_hint and col == x_col_hint:
+                x_col = col
+            elif y_col_hint and col == y_col_hint:
+                y_col = col
+            # Check column name patterns
+            elif not x_col and any(pattern in col_lower for pattern in x_patterns):
+                x_col = col
+            elif not y_col and any(pattern in col_lower for pattern in y_patterns):
+                y_col = col
+            # Otherwise, assign based on type
+            elif not x_col and is_categorical:
+                x_col = col
+            elif not y_col and is_numeric:
+                y_col = col
+        
+        # Fallback: if we couldn't detect, use first as x, second as y
+        if not x_col:
+            x_col = df.columns[0]
+        if not y_col:
+            y_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        
+        # Ensure x and y are different
+        if x_col == y_col and len(df.columns) >= 2:
+            # Swap if they're the same
+            x_col, y_col = df.columns[0], df.columns[1]
         
         # Sort by y-axis values (descending) for top N queries
         df_sorted = df.sort_values(by=y_col, ascending=False)
@@ -321,17 +372,17 @@ def create_pie_chart(df: pd.DataFrame, title: str = "Chart") -> str:
     
     return img_base64
 
-def generate_chart(df: pd.DataFrame, chart_type: str, title: str = "Chart") -> str:
+def generate_chart(df: pd.DataFrame, chart_type: str, title: str = "Chart", question: str = "") -> str:
     """Generate chart based on type and return base64 encoded image."""
     if chart_type == 'bar':
-        return create_bar_chart(df, title)
+        return create_bar_chart(df, title, question)
     elif chart_type == 'line':
         return create_line_chart(df, title)
     elif chart_type == 'pie':
         return create_pie_chart(df, title)
     else:
         # Default to bar chart
-        return create_bar_chart(df, title)
+        return create_bar_chart(df, title, question)
 
 class ChartQuestionReq(BaseModel):
     question: str
@@ -414,7 +465,7 @@ def ask_with_chart(req: ChartQuestionReq):
         # Generate chart
         try:
             chart_title = req.question[:50]  # Use question as title (truncated)
-            chart_base64 = generate_chart(df, chart_type, chart_title)
+            chart_base64 = generate_chart(df, chart_type, chart_title, req.question)
         except Exception as e:
             return {
                 "ok": False,
