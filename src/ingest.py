@@ -112,36 +112,46 @@ def _refresh_utilisation_view(con) -> None:
 
     candidates: list[tuple[str, str, str]] = []  # (table_name, project_key_column, duration_column)
     for t in tables:
+        # Skip registry tables
+        if t in ("schema_registry", "raw_sheet_registry"):
+            continue
         try:
             cols = con.execute(f"PRAGMA table_info('{t}')").fetchall()
-        except Exception:
+        except Exception as e:
             continue
         names = [c[1] for c in cols]
         lower = [str(c or "").lower() for c in names]
+        
         # Find a project key–like column (very tolerant: any col containing 'project' or 'proj')
         proj_col = None
-        for name, low in zip(names, lower):
-            if "project" in low or "proj" in low:
-                proj_col = name
-                break
-        if not proj_col and "project_key" in lower:
+        if "project_key" in lower:
             proj_col = names[lower.index("project_key")]
+        else:
+            for name, low in zip(names, lower):
+                if "project" in low or "proj" in low:
+                    proj_col = name
+                    break
         if not proj_col:
             continue
 
-        # Find a duration/hours–like column
+        # Find a duration/hours–like column (exact match first, then substring)
         dur_col = None
-        for name, low in zip(names, lower):
-            if "duration" in low or "hours" in low or "hrs" in low:
-                dur_col = name
-                break
+        if "hours" in lower:
+            dur_col = names[lower.index("hours")]
+        elif "duration" in lower:
+            dur_col = names[lower.index("duration")]
+        else:
+            for name, low in zip(names, lower):
+                if "duration" in low or "hours" in low or "hrs" in low:
+                    dur_col = name
+                    break
         if not dur_col:
             continue
 
         candidates.append((t, proj_col, dur_col))
 
     if not candidates:
-        print("ℹ️ _refresh_utilisation_view: no candidate utilisation tables found.")
+        print(f"ℹ️  _refresh_utilisation_view: no candidate utilisation tables found (scanned {len(tables)} tables, need project_key + hours/duration columns).")
         return
 
     parts = []
@@ -162,9 +172,10 @@ def _refresh_utilisation_view(con) -> None:
     view_sql = "CREATE OR REPLACE VIEW utilisation_matrix_all AS\n" + union_sql
     try:
         con.execute(view_sql)
-        print(f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} utilisation-like table(s).")
+        print(f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} table(s): {[c[0] for c in candidates]}")
     except Exception as e:
-        print(f"Warning: failed to refresh utilisation_matrix_all view: {e}")
+        print(f"⚠️  Warning: failed to refresh utilisation_matrix_all view: {e}")
+        print(f"   Attempted SQL (first 500 chars): {view_sql[:500]}")
 
 def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None, exclude_files: Optional[List[str]] = None):
     con = connect(db_path)
