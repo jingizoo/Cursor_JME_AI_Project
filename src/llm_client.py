@@ -7,6 +7,30 @@ from typing import Any, Dict, List, Optional
 
 _OLLAMA_SEM = threading.Semaphore(int(os.getenv("OLLAMA_MAX_CONCURRENCY", "1")))
 
+def _env_int(name: str) -> int | None:
+    v = os.getenv(name)
+    if v is None:
+        return None
+    v = str(v).strip()
+    if not v:
+        return None
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+def _env_float(name: str) -> float | None:
+    v = os.getenv(name)
+    if v is None:
+        return None
+    v = str(v).strip()
+    if not v:
+        return None
+    try:
+        return float(v)
+    except Exception:
+        return None
+
 def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.0, timeout_sec: int = 300, num_predict: int = 512) -> str:
     """
     Calls Ollama /api/chat.
@@ -32,6 +56,32 @@ def ollama_chat(*, base_url: str, model: str, messages: List[Dict[str, str]], te
             "num_predict": num_predict,
         }
     }
+
+    # Optional perf knobs (all optional; only sent if env var is set)
+    # Docs: Ollama model options: num_ctx, num_thread, top_k, top_p, repeat_penalty, mirostat, etc.
+    num_ctx = _env_int("OLLAMA_NUM_CTX")
+    if num_ctx:
+        payload_base["options"]["num_ctx"] = num_ctx
+
+    num_thread = _env_int("OLLAMA_NUM_THREAD")
+    if num_thread:
+        payload_base["options"]["num_thread"] = num_thread
+
+    top_k = _env_int("OLLAMA_TOP_K")
+    if top_k is not None:
+        payload_base["options"]["top_k"] = top_k
+
+    top_p = _env_float("OLLAMA_TOP_P")
+    if top_p is not None:
+        payload_base["options"]["top_p"] = top_p
+
+    repeat_penalty = _env_float("OLLAMA_REPEAT_PENALTY")
+    if repeat_penalty is not None:
+        payload_base["options"]["repeat_penalty"] = repeat_penalty
+
+    seed = _env_int("OLLAMA_SEED")
+    if seed is not None:
+        payload_base["options"]["seed"] = seed
 
     # Optional features (newer Ollama supports these)
     want_json = os.getenv("OLLAMA_FORCE_JSON", "1").lower() in ("1", "true", "yes")

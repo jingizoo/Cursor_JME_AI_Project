@@ -4,6 +4,7 @@ This API extends the main API with chart generation capabilities.
 """
 import base64
 import io
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -69,12 +70,12 @@ def _schema_for_llm(con, question: str, max_tables: int = None, max_cols_per_tab
     
     # Get limits from environment variables or use defaults
     if max_tables is None:
-        max_tables = int(os.getenv("JME_MAX_TABLES", "0"))  # 0 means unlimited/all tables
-        if max_tables == 0:
-            max_tables = None
+        env = int(os.getenv("JME_MAX_TABLES", "12"))
+        max_tables = None if env <= 0 else env
     
     if max_cols_per_table is None:
-        max_cols_per_table = int(os.getenv("JME_MAX_COLS", "50"))  # Default 50 columns per table
+        env = int(os.getenv("JME_MAX_COLS", "25"))
+        max_cols_per_table = None if env <= 0 else env
     
     # Get all existing tables
     existing_tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
@@ -117,11 +118,33 @@ def _schema_for_llm(con, question: str, max_tables: int = None, max_cols_per_tab
         # Include ALL tables (no limit)
         selected = data_tables
     
+    # Fast path: use cached column lists from raw_sheet_registry when available
+    registry_cols: dict[str, list[str]] = {}
+    if "raw_sheet_registry" in existing_set:
+        try:
+            rows = con.execute("SELECT raw_table, columns_json FROM raw_sheet_registry ORDER BY updated_ts DESC").fetchall()
+            for r in rows:
+                tname = r[0]
+                if not tname or tname in registry_cols:
+                    continue
+                try:
+                    cols = json.loads(r[1] or "null")
+                    if isinstance(cols, list) and all(isinstance(c, str) for c in cols):
+                        registry_cols[tname] = cols
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     # ✅ Names-only schema payload (smaller + easier for LLM)
     tables: dict[str, list[str]] = {}
     for t in selected:
         # For explicitly mentioned tables, include more columns if limit is set
         col_limit = max_cols_per_table * 2 if (t.lower() in question_lower and max_cols_per_table) else max_cols_per_table
+        cols_list = registry_cols.get(t)
+        if cols_list is not None:
+            tables[t] = cols_list[:col_limit] if col_limit else cols_list
+            continue
         cols = _get_table_info_cached(con, t, max_cols=col_limit)
         tables[t] = [c["name"] for c in cols]
 

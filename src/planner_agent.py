@@ -112,10 +112,10 @@ def plan_sql(*, base_url: str, model: str, schema: Dict[str, Any], question: str
     
     user = json.dumps(user_data, ensure_ascii=False, separators=(',', ':'))  # Compact JSON (no spaces)
     
-    # Use num_predict to limit generation and speed up (SQL is usually short)
-    # For smaller models (3b), use lower limits. For larger models (8b+), use higher limits.
-    # Make it configurable via environment variable
-    default_num_predict = 512 if ("3b" in model.lower() or "1b" in model.lower()) else 1024
+    # Use num_predict to limit generation and speed up (SQL is usually short).
+    # Keep this small on CPU: the JSON+SQL response should fit well under ~256 tokens.
+    # Make it configurable via environment variable.
+    default_num_predict = 256 if ("3b" in model.lower() or "1b" in model.lower()) else 512
     num_predict_limit = int(os.getenv("OLLAMA_NUM_PREDICT", str(default_num_predict)))
     
     # Timeout: smaller models might be slower, but also might hang. Use configurable timeout.

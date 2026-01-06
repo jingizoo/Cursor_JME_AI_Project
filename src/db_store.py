@@ -2,7 +2,7 @@ import json
 import time
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import duckdb
 import pandas as pd
@@ -33,6 +33,7 @@ CANON_DDL = [
         file_size BIGINT,
         file_mtime BIGINT,
         raw_table TEXT,
+        columns_json TEXT,
         n_rows BIGINT,
         n_cols BIGINT,
         updated_ts DOUBLE,
@@ -40,6 +41,21 @@ CANON_DDL = [
     )
     """,
 ]
+
+def _ensure_column(con: duckdb.DuckDBPyConnection, *, table: str, column: str, ddl_type: str) -> None:
+    """
+    Best-effort migration helper. DuckDB doesn't always support IF NOT EXISTS for ADD COLUMN
+    across versions, so we check first.
+    """
+    try:
+        cols = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+        names = {c[1] for c in cols}
+        if column in names:
+            return
+        con.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {ddl_type}')
+    except Exception:
+        # If anything goes wrong, skip; the rest of the app can fall back to PRAGMA table_info.
+        pass
 
 def connect(db_path: Path, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     """
@@ -83,6 +99,8 @@ def connect(db_path: Path, read_only: bool = False) -> duckdb.DuckDBPyConnection
                 except Exception:
                     # Table might already exist, ignore
                     pass
+            # Lightweight migration(s)
+            _ensure_column(con, table="raw_sheet_registry", column="columns_json", ddl_type="TEXT")
     
     return con
 
@@ -125,16 +143,27 @@ def upsert_raw_sheet(
     file_size: int,
     file_mtime: int,
     raw_table: str,
+    columns: Optional[Sequence[str]] = None,
     n_rows: int,
     n_cols: int,
 ) -> None:
     con.execute(
         """
         INSERT OR REPLACE INTO raw_sheet_registry
-        (file, sheet, file_size, file_mtime, raw_table, n_rows, n_cols, updated_ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (file, sheet, file_size, file_mtime, raw_table, columns_json, n_rows, n_cols, updated_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        [file, sheet, int(file_size), int(file_mtime), raw_table, int(n_rows), int(n_cols), time.time()],
+        [
+            file,
+            sheet,
+            int(file_size),
+            int(file_mtime),
+            raw_table,
+            json.dumps(list(columns) if columns is not None else None, ensure_ascii=False),
+            int(n_rows),
+            int(n_cols),
+            time.time(),
+        ],
     )
 
 def find_raw_sheet(
@@ -146,9 +175,15 @@ def find_raw_sheet(
     file_mtime: int,
 ) -> Optional[Dict[str, Any]]:
     row = con.execute(
-        "SELECT raw_table, n_rows, n_cols, updated_ts FROM raw_sheet_registry WHERE file=? AND sheet=? AND file_size=? AND file_mtime=?",
+        "SELECT raw_table, columns_json, n_rows, n_cols, updated_ts FROM raw_sheet_registry WHERE file=? AND sheet=? AND file_size=? AND file_mtime=?",
         [file, sheet, int(file_size), int(file_mtime)],
     ).fetchone()
     if not row:
         return None
-    return {"raw_table": row[0], "n_rows": int(row[1] or 0), "n_cols": int(row[2] or 0), "updated_ts": row[3]}
+    try:
+        cols = json.loads(row[1] or "null")
+        if not isinstance(cols, list):
+            cols = None
+    except Exception:
+        cols = None
+    return {"raw_table": row[0], "columns": cols, "n_rows": int(row[2] or 0), "n_cols": int(row[3] or 0), "updated_ts": row[4]}

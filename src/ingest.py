@@ -1,9 +1,9 @@
+import os
 import re
 import hashlib
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-import numpy as np
 import pandas as pd
 
 try:
@@ -12,31 +12,11 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 
-from .db_store import connect, upsert_mapping, find_mapping, append_rows, upsert_raw_sheet, find_raw_sheet
+from .db_store import connect, upsert_mapping, find_mapping, upsert_raw_sheet, find_raw_sheet
 from .schema_agent import summarize_schema, infer_sheet_mapping
 from .vector_db import store_pdf_embeddings, store_wiki_embeddings
 from .wiki_extractor import extract_wiki_from_url
 from .utils_columns import normalize_columns
-
-def parse_num(x) -> Optional[float]:
-    if x is None:
-        return None
-    s = str(x).strip()
-    if not s or s.lower() in {"nan","none","null"}:
-        return None
-    neg = False
-    if s.startswith("(") and s.endswith(")"):
-        neg = True
-        s = s[1:-1]
-    m = re.search(r"-?\d[\d,]*\.?\d*", s)
-    if not m:
-        return None
-    num = m.group(0).replace(",", "")
-    try:
-        v = float(num)
-        return -v if neg else v
-    except Exception:
-        return None
 
 def detect_header_row(xf: Path, sheet: str, max_scan: int = 25) -> int:
     preview = pd.read_excel(str(xf), sheet_name=sheet, header=None, nrows=max_scan, engine="openpyxl")
@@ -115,80 +95,6 @@ def materialize_raw_sheet(con, *, file: str, sheet: str, df: pd.DataFrame) -> st
     con.unregister("df_tmp")
     return base
 
-def normalize_and_insert(con, file: str, sheet: str, sheet_type: str, mapping: Dict[str, Any], df: pd.DataFrame):
-    df2 = df.copy()
-    cols = {str(c): c for c in df2.columns}
-    def col(name):
-        if name is None: return None
-        return cols.get(str(name))
-
-    if sheet_type == "invoices":
-        out = pd.DataFrame({
-            "source_file": file,
-            "source_sheet": sheet,
-            "invoice_id": df2[col(mapping.get("invoice_id"))] if col(mapping.get("invoice_id")) else None,
-            "invoice_date": pd.to_datetime(df2[col(mapping.get("invoice_date"))], errors="coerce") if col(mapping.get("invoice_date")) else None,
-            "due_date": pd.to_datetime(df2[col(mapping.get("due_date"))], errors="coerce") if col(mapping.get("due_date")) else None,
-            "client": df2[col(mapping.get("client"))] if col(mapping.get("client")) else None,
-            "taxable_value": df2[col(mapping.get("taxable_value"))].apply(parse_num) if col(mapping.get("taxable_value")) else None,
-            "gst_amount": df2[col(mapping.get("gst_amount"))].apply(parse_num) if col(mapping.get("gst_amount")) else None,
-            "invoice_total": df2[col(mapping.get("invoice_total"))].apply(parse_num) if col(mapping.get("invoice_total")) else None,
-        }).dropna(subset=["invoice_id"], how="all")
-        append_rows(con, "invoices", out)
-
-    elif sheet_type == "payments":
-        out = pd.DataFrame({
-            "source_file": file,
-            "source_sheet": sheet,
-            "payment_date": pd.to_datetime(df2[col(mapping.get("payment_date"))], errors="coerce") if col(mapping.get("payment_date")) else None,
-            "invoice_id": df2[col(mapping.get("invoice_id"))] if col(mapping.get("invoice_id")) else None,
-            "client": df2[col(mapping.get("client"))] if col(mapping.get("client")) else None,
-            "amount": df2[col(mapping.get("amount"))].apply(parse_num) if col(mapping.get("amount")) else None,
-            "bank_ref": df2[col(mapping.get("bank_ref"))] if col(mapping.get("bank_ref")) else None,
-            "mode": df2[col(mapping.get("mode"))] if col(mapping.get("mode")) else None,
-        }).dropna(subset=["amount"], how="all")
-        append_rows(con, "payments", out)
-
-    elif sheet_type == "expenses":
-        out = pd.DataFrame({
-            "source_file": file,
-            "source_sheet": sheet,
-            "expense_date": pd.to_datetime(df2[col(mapping.get("expense_date"))], errors="coerce") if col(mapping.get("expense_date")) else None,
-            "vendor": df2[col(mapping.get("vendor"))] if col(mapping.get("vendor")) else None,
-            "category": df2[col(mapping.get("category"))] if col(mapping.get("category")) else None,
-            "taxable_value": df2[col(mapping.get("taxable_value"))].apply(parse_num) if col(mapping.get("taxable_value")) else None,
-            "gst_amount": df2[col(mapping.get("gst_amount"))].apply(parse_num) if col(mapping.get("gst_amount")) else None,
-            "tds_amount": df2[col(mapping.get("tds_amount"))].apply(parse_num) if col(mapping.get("tds_amount")) else None,
-            "paid_amount": df2[col(mapping.get("paid_amount"))].apply(parse_num) if col(mapping.get("paid_amount")) else None,
-        }).dropna(subset=["paid_amount"], how="all")
-        append_rows(con, "expenses", out)
-
-    elif sheet_type == "bank_txns":
-        credit_col = col(mapping.get("credit"))
-        debit_col = col(mapping.get("debit"))
-        amount_col = col(mapping.get("amount"))
-
-        if amount_col is not None:
-            amt = df2[amount_col].apply(parse_num)
-            direction = df2[col(mapping.get("direction"))] if col(mapping.get("direction")) else np.where(amt>=0, "IN", "OUT")
-            amt_abs = amt.abs()
-        else:
-            credit = df2[credit_col].apply(parse_num) if credit_col is not None else None
-            debit = df2[debit_col].apply(parse_num) if debit_col is not None else None
-            amt_abs = (credit.fillna(0) + debit.fillna(0)).replace(0, np.nan)
-            direction = np.where(credit.fillna(0)>0, "IN", np.where(debit.fillna(0)>0, "OUT", None))
-
-        out = pd.DataFrame({
-            "source_file": file,
-            "source_sheet": sheet,
-            "txn_date": pd.to_datetime(df2[col(mapping.get("txn_date"))], errors="coerce") if col(mapping.get("txn_date")) else None,
-            "description": df2[col(mapping.get("description"))] if col(mapping.get("description")) else None,
-            "amount": amt_abs,
-            "direction": direction,
-            "reference": df2[col(mapping.get("reference"))] if col(mapping.get("reference")) else None,
-        }).dropna(subset=["amount"], how="all")
-        append_rows(con, "bank_txns", out)
-
 def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None, exclude_files: Optional[List[str]] = None):
     con = connect(db_path)
     ingested = 0
@@ -197,6 +103,7 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
     
     # Normalize exclude list (case-insensitive matching)
     exclude_set = set(f.lower() for f in (exclude_files or []))
+    enable_sheet_notes = os.getenv("JME_ENABLE_SHEET_NOTES", "0").lower() in ("1", "true", "yes")
 
     # Process Excel files
     for xf in sorted(list(data_dir.glob("*.xlsx")) + list(data_dir.glob("*.xlsm"))):
@@ -216,9 +123,9 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
         for sheet in xls.sheet_names:
             if not force:
                 # Don't skip if we haven't materialized a raw table yet (supports backfilling after upgrade).
-                existing = find_mapping(con, xf.name, sheet, file_size, file_mtime)
                 existing_raw = find_raw_sheet(con, file=xf.name, sheet=sheet, file_size=file_size, file_mtime=file_mtime)
-                if existing and existing_raw:
+                existing = find_mapping(con, xf.name, sheet, file_size, file_mtime) if enable_sheet_notes else None
+                if existing_raw and (existing or not enable_sheet_notes):
                     skipped += 1
                     continue
 
@@ -237,23 +144,25 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                     file_size=file_size,
                     file_mtime=file_mtime,
                     raw_table=raw_table,
+                    columns=list(df.columns),
                     n_rows=int(df.shape[0]),
                     n_cols=int(df.shape[1]),
                 )
 
-                schema = summarize_schema(df)
-                mapping_rec = infer_sheet_mapping(base_url=base_url, model=model, file=xf.name, sheet=sheet, schema=schema)
-
-                upsert_mapping(con, {
-                    "file": xf.name,
-                    "sheet": sheet,
-                    "file_size": file_size,
-                    "file_mtime": file_mtime,
-                    "sheet_type": mapping_rec["sheet_type"],
-                    "mapping": mapping_rec["mapping"],
-                    "confidence": mapping_rec["confidence"],
-                    "notes": mapping_rec.get("notes",""),
-                })
+                # Optional: store LLM-generated sheet notes in schema_registry (disabled by default for speed)
+                if enable_sheet_notes:
+                    schema = summarize_schema(df)
+                    mapping_rec = infer_sheet_mapping(base_url=base_url, model=model, file=xf.name, sheet=sheet, schema=schema)
+                    upsert_mapping(con, {
+                        "file": xf.name,
+                        "sheet": sheet,
+                        "file_size": file_size,
+                        "file_mtime": file_mtime,
+                        "sheet_type": mapping_rec.get("sheet_type", "unknown"),
+                        "mapping": mapping_rec.get("mapping", {}),
+                        "confidence": mapping_rec.get("confidence", 0.0),
+                        "notes": mapping_rec.get("notes",""),
+                    })
 
                 # Note: normalize_and_insert is no longer used - we only create raw tables
                 # The raw table is already created above via materialize_raw_sheet()
@@ -296,9 +205,9 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                 df = table_info["df"]
 
                 if not force:
-                    existing = find_mapping(con, pdf_path.name, sheet, file_size, file_mtime)
                     existing_raw = find_raw_sheet(con, file=pdf_path.name, sheet=sheet, file_size=file_size, file_mtime=file_mtime)
-                    if existing and existing_raw:
+                    existing = find_mapping(con, pdf_path.name, sheet, file_size, file_mtime) if enable_sheet_notes else None
+                    if existing_raw and (existing or not enable_sheet_notes):
                         skipped += 1
                         continue
 
@@ -316,23 +225,25 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                         file_size=file_size,
                         file_mtime=file_mtime,
                         raw_table=raw_table,
+                        columns=list(df.columns),
                         n_rows=int(df.shape[0]),
                         n_cols=int(df.shape[1]),
                     )
 
-                    schema = summarize_schema(df)
-                    mapping_rec = infer_sheet_mapping(base_url=base_url, model=model, file=pdf_path.name, sheet=sheet, schema=schema)
-
-                    upsert_mapping(con, {
-                        "file": pdf_path.name,
-                        "sheet": sheet,
-                        "file_size": file_size,
-                        "file_mtime": file_mtime,
-                        "sheet_type": mapping_rec["sheet_type"],
-                        "mapping": mapping_rec["mapping"],
-                        "confidence": mapping_rec["confidence"],
-                        "notes": mapping_rec.get("notes",""),
-                    })
+                    # Optional: store LLM-generated sheet notes in schema_registry (disabled by default for speed)
+                    if enable_sheet_notes:
+                        schema = summarize_schema(df)
+                        mapping_rec = infer_sheet_mapping(base_url=base_url, model=model, file=pdf_path.name, sheet=sheet, schema=schema)
+                        upsert_mapping(con, {
+                            "file": pdf_path.name,
+                            "sheet": sheet,
+                            "file_size": file_size,
+                            "file_mtime": file_mtime,
+                            "sheet_type": mapping_rec.get("sheet_type", "unknown"),
+                            "mapping": mapping_rec.get("mapping", {}),
+                            "confidence": mapping_rec.get("confidence", 0.0),
+                            "notes": mapping_rec.get("notes",""),
+                        })
 
                     # Note: normalize_and_insert is no longer used - we only create raw tables
                     # The raw table is already created above via materialize_raw_sheet()

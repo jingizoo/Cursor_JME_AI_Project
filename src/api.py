@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import tempfile
@@ -121,8 +122,32 @@ def _schema_for_llm(con, question: str, max_tables: int | None = None, max_cols_
 
     # ✅ Names-only schema payload (smaller + easier for LLM)
     tables: dict[str, list[str]] = {}
+
+    # Fast path: use cached column lists from raw_sheet_registry when available
+    registry_cols: dict[str, list[str]] = {}
+    if "raw_sheet_registry" in existing_set:
+        try:
+            rows = con.execute("SELECT raw_table, columns_json FROM raw_sheet_registry ORDER BY updated_ts DESC").fetchall()
+            for r in rows:
+                tname = r[0]
+                if not tname or tname in registry_cols:
+                    continue
+                try:
+                    cols = json.loads(r[1] or "null")
+                    if isinstance(cols, list) and all(isinstance(c, str) for c in cols):
+                        registry_cols[tname] = cols
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     for t in selected:
-        # All tables get the same column limit (no special handling for canonical)
+        cols_list = registry_cols.get(t)
+        if cols_list is not None:
+            tables[t] = cols_list[:max_cols_per_table] if max_cols_per_table else cols_list
+            continue
+
+        # Fallback: query DuckDB for column info
         cols = _get_table_info_cached(con, t, max_cols=max_cols_per_table)
         tables[t] = [c["name"] for c in cols]
 
