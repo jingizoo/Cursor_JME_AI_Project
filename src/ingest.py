@@ -86,13 +86,54 @@ def materialize_raw_sheet(con, *, file: str, sheet: str, df: pd.DataFrame) -> st
     """
     Create/replace a raw DuckDB table for the sheet so it can be queried later via /ask.
     Table name is deterministic per (file, sheet) so re-ingests overwrite the same table.
+    Uses full file path in hash to ensure uniqueness even when filenames are similar.
     """
     df = normalize_columns(df)  # ✅ enforce before writing to DuckDB
-    base = f"raw__{_safe_ident(Path(file).stem)}__{_safe_ident(sheet)}__{_short_hash(file + '|' + sheet)}"
+    
+    # Use full file path (if available) or filename for hash to ensure uniqueness
+    # This prevents collisions when multiple files have the same stem/initials
+    file_key = str(file)  # Use full filename as provided
+    hash_input = f"{file_key}|{sheet}"
+    table_hash = _short_hash(hash_input)
+    
+    # Generate table name with safe identifiers and hash
+    file_stem = _safe_ident(Path(file).stem)
+    sheet_safe = _safe_ident(sheet)
+    
+    # Ensure table name is unique and not too long (DuckDB identifier limit is typically 63 chars)
+    # Format: raw__<file_stem>__<sheet>__<hash>
+    # If too long, truncate file_stem and sheet but keep hash
+    base = f"raw__{file_stem}__{sheet_safe}__{table_hash}"
+    
+    # Safety: truncate if too long (keep hash intact)
+    max_len = 60  # Leave room for quotes
+    if len(base) > max_len:
+        # Truncate file_stem and sheet_safe proportionally, but keep hash
+        hash_len = len(table_hash) + 10  # hash + separators
+        available = max_len - hash_len
+        if available > 20:
+            # Split available space between file and sheet
+            file_max = min(len(file_stem), available // 2)
+            sheet_max = min(len(sheet_safe), available - file_max)
+            file_stem = file_stem[:file_max]
+            sheet_safe = sheet_safe[:sheet_max]
+            base = f"raw__{file_stem}__{sheet_safe}__{table_hash}"
+        else:
+            # Fallback: just use hash
+            base = f"raw__{table_hash}"
+    
     # Quote identifier to be safe even if it contains odd characters (shouldn't after _safe_ident).
-    con.register("df_tmp", df)
-    con.execute(f'CREATE OR REPLACE TABLE "{base}" AS SELECT * FROM df_tmp')
-    con.unregister("df_tmp")
+    try:
+        con.register("df_tmp", df)
+        con.execute(f'CREATE OR REPLACE TABLE "{base}" AS SELECT * FROM df_tmp')
+        con.unregister("df_tmp")
+    except Exception as e:
+        # If table creation fails, try with a simpler name
+        if "df_tmp" in str(con.execute("SHOW TABLES").fetchall()):
+            con.unregister("df_tmp")
+        # Re-raise the error
+        raise Exception(f"Failed to create table '{base}': {e}")
+    
     return base
 
 def _refresh_utilisation_view(con) -> tuple[bool, str]:
@@ -115,8 +156,8 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
 
     candidates: list[tuple[str, str, str, str]] = []  # (table_name, project_key_column, duration_column, duration_type)
     for t in tables:
-        # Skip registry tables
-        if t in ("schema_registry", "raw_sheet_registry"):
+        # Skip registry tables AND the view itself to prevent recursion
+        if t in ("schema_registry", "raw_sheet_registry", "utilisation_matrix_all"):
             continue
         try:
             cols = con.execute(f"PRAGMA table_info('{t}')").fetchall()
@@ -233,8 +274,20 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
         
         parts.append(f"SELECT {', '.join(select_parts)} FROM {t_quoted}")
 
+    if not parts:
+        msg = "⚠️  No valid SELECT parts generated for utilisation_matrix_all view."
+        print(msg)
+        return False, msg
+    
     union_sql = "\nUNION ALL\n".join(parts)
     view_sql = "CREATE OR REPLACE VIEW utilisation_matrix_all AS\n" + union_sql
+    
+    # Safety check: ensure view doesn't reference itself
+    if "utilisation_matrix_all" in union_sql.upper():
+        err_msg = "⚠️  Error: view SQL would reference itself (recursive view detected)."
+        print(err_msg)
+        return False, err_msg
+    
     try:
         con.execute(view_sql)
         msg = f"✓ Refreshed view utilisation_matrix_all from {len(candidates)} table(s): {[c[0] for c in candidates]}"
@@ -244,6 +297,10 @@ def _refresh_utilisation_view(con) -> tuple[bool, str]:
         err_msg = f"⚠️  Warning: failed to refresh utilisation_matrix_all view: {e}"
         print(err_msg)
         print(f"   Attempted SQL (first 500 chars): {view_sql[:500]}")
+        # Check if error suggests recursion
+        err_str = str(e).lower()
+        if "recursion" in err_str or "circular" in err_str or "self" in err_str:
+            err_msg += " (Possible recursive view detected)"
         return False, err_msg
 
 def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, force: bool = False, wiki_urls: Optional[List[str]] = None, wiki_api_key: Optional[str] = None, exclude_files: Optional[List[str]] = None):
@@ -436,8 +493,16 @@ def ingest_folder(*, data_dir: Path, db_path: Path, base_url: str, model: str, f
                     errors.append({"file": f"wiki:{wiki_url}", "error": f"Failed to process wiki: {e}"})
 
     # Refresh consolidated utilisation view (if relevant tables exist)
-    view_success, view_msg = _refresh_utilisation_view(con)
-    if not view_success:
-        errors.append({"file": "system", "error": f"Failed to refresh utilisation_matrix_all view: {view_msg}"})
+    # Only refresh once at the end to avoid recursion issues
+    try:
+        view_success, view_msg = _refresh_utilisation_view(con)
+        if not view_success:
+            # Only add as error if it's a real error, not just "no candidates found"
+            if "no candidate" not in view_msg.lower():
+                errors.append({"file": "system", "error": f"Failed to refresh utilisation_matrix_all view: {view_msg}"})
+    except RecursionError as e:
+        errors.append({"file": "system", "error": f"Recursion error while refreshing view: {e}"})
+    except Exception as e:
+        errors.append({"file": "system", "error": f"Unexpected error refreshing view: {e}"})
 
     return {"ok": True, "ingested_sheets": ingested, "wiki_pages": wiki_ingested, "skipped": skipped, "errors": errors}
