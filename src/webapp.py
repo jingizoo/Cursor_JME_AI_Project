@@ -432,19 +432,113 @@ INDEX_HTML = """<!doctype html>
           }
 
           // 4) Bar: if multiple numeric columns => grouped bars
-          // Pick a categorical x
-          // Prefer (year, month) -> YYYY-MM if present
+          // Smart axis detection: check question hints, column names, and types
+          const questionLower = question.toLowerCase();
+          
+          // Check question for explicit hints (e.g., "plot users on x axis")
+          let xColHint = null;
+          let yColHint = null;
+          for (const c of cols) {
+            const cLower = String(c).toLowerCase();
+            if ((questionLower.includes('plot') || questionLower.includes('x axis') || questionLower.includes('x-axis')) && 
+                questionLower.includes(cLower)) {
+              xColHint = c;
+            }
+            if ((questionLower.includes('y axis') || questionLower.includes('y-axis')) && 
+                questionLower.includes(cLower)) {
+              yColHint = c;
+            }
+          }
+          
+          // Column name patterns for x-axis (categorical) and y-axis (numeric)
+          const xPatterns = ['user', 'name', 'category', 'type', 'status', 'area', 'module', 'project', 'sub_category'];
+          const yPatterns = ['total', 'sum', 'count', 'hours', 'duration', 'amount', 'value', 'quantity'];
+          
+          // Smart column selection for bar charts
+          let xCol = null;
+          let yCols = [];
+          
+          // First, check hints from question
+          if (xColHint && cols.includes(xColHint)) {
+            xCol = xColHint;
+          }
+          if (yColHint && cols.includes(yColHint)) {
+            yCols = [yColHint];
+          }
+          
+          // If no hints, detect based on column names and types
+          if (!xCol) {
+            // Prefer text columns for x-axis
+            for (const c of textCols) {
+              const cLower = String(c).toLowerCase();
+              if (xPatterns.some(p => cLower.includes(p))) {
+                xCol = c;
+                break;
+              }
+            }
+            // If no pattern match, use first text column
+            if (!xCol && textCols.length > 0) {
+              xCol = textCols[0];
+            }
+            // Fallback to first dimension column
+            if (!xCol) {
+              xCol = labelCol;
+            }
+          }
+          
+          if (yCols.length === 0) {
+            // Prefer numeric measure columns for y-axis
+            for (const c of numericMeasureCols) {
+              const cLower = String(c).toLowerCase();
+              if (yPatterns.some(p => cLower.includes(p))) {
+                yCols.push(c);
+                break;
+              }
+            }
+            // If no pattern match, use numeric measure columns
+            if (yCols.length === 0 && numericMeasureCols.length > 0) {
+              yCols = numericMeasureCols;
+            }
+            // Fallback to all numeric columns
+            if (yCols.length === 0 && numericCols.length > 0) {
+              yCols = numericCols;
+            }
+            // Final fallback
+            if (yCols.length === 0) {
+              yCols = [cols[1] || cols[0]];
+            }
+          }
+          
+          // Ensure x and y are different
+          if (xCol && yCols.length > 0 && yCols[0] === xCol && cols.length > 1) {
+            // Swap: if x and y are the same, use first text for x, first numeric for y
+            if (textCols.length > 0) {
+              xCol = textCols[0];
+            }
+            if (numericCols.length > 0) {
+              yCols = [numericCols[0]];
+            } else if (cols.length > 1) {
+              yCols = [cols[1]];
+            }
+          }
+          
+          // Ensure xCol is set (safety check)
+          if (!xCol) {
+            xCol = cols[0];
+          }
+          
+          // Prefer (year, month) -> YYYY-MM if present (but only if xCol wasn't set by hints)
           const hasYear = numericDimCols.map(c => c.toLowerCase()).includes('year');
           const hasMonth = numericDimCols.map(c => c.toLowerCase()).includes('month');
-          let xCol = labelCol;
           let x = plotRows.map(r => r[xCol]);
-          if (hasYear && hasMonth) {
+          if (!xColHint && hasYear && hasMonth && textCols.length === 0) {
             const yCol = numericDimCols.find(c => c.toLowerCase() === 'year');
             const mCol = numericDimCols.find(c => c.toLowerCase() === 'month');
             xCol = 'period';
             x = buildTimeKey(plotRows, yCol, mCol);
+          } else {
+            x = plotRows.map(r => r[xCol]);
           }
-          const yCols = numericMeasureCols.length ? numericMeasureCols : (numericCols.length ? numericCols : [cols[1]]);
           // If we have 2 categorical dimensions + 1 measure, use dim2 as series.
           if ((type === 'bar' || type === 'auto') && textCols.length >= 2 && yCols.length === 1) {
             const dim1 = textCols[0];
